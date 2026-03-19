@@ -44,31 +44,66 @@ class TelegramWebhookController extends Controller
 
         [$command, $arguments] = $this->extractCommand($text);
         $inlineKeyboard = null;
+        $fromUser = is_array($message['from'] ?? null) ? $message['from'] : [];
+        $fromTelegramId = isset($fromUser['id']) ? (string) $fromUser['id'] : null;
+        $reply = '';
 
-        $reply = match ($command) {
-            'newbet' => $betService->openRound($chatId, isset($message['from']['id']) ? (string) $message['from']['id'] : null),
-            'bet' => $arguments === ''
-                ? 'Specifica una puntata: /bet <under15|15-30|30-45|over45>.'
-                : $betService->placeBet($chatId, is_array($message['from'] ?? null) ? $message['from'] : [], $arguments),
-            'start', 'startbath' => $betService->startBathroomSession($arguments !== '' ? $arguments : null),
-            'stop', 'endbath' => $betService->endBathroomSessionAndResolve($chatId),
-            'leaderboard' => $betService->leaderboard(),
-            'link' => $arguments === ''
-                ? 'Specifica il codice: /link <codice>'
-                : $telegramLinkService->linkFromTelegram(
-                    is_array($message['from'] ?? null) ? $message['from'] : [],
-                    $arguments,
-                ),
-            'help' => $betService->help(),
-            default => 'Comando non riconosciuto. Usa /help.',
-        };
+        switch ($command) {
+            case 'newbet':
+                $reply = $betService->openRound($chatId, $fromTelegramId);
+                $round = $betService->openRoundForChat($chatId);
+                if ($round) {
+                    $inlineKeyboard = $betService->roundInlineKeyboard($round->id);
+                }
+                break;
 
-        if ($command === 'newbet') {
-            $round = $betService->openRoundForChat($chatId);
+            case 'bet':
+                $reply = $arguments === ''
+                    ? 'Specifica una puntata: /bet <under15|15-30|30-45|over45>.'
+                    : $betService->placeBet($chatId, $fromUser, $arguments);
+                break;
 
-            if ($round) {
-                $inlineKeyboard = $betService->roundInlineKeyboard($round->id);
-            }
+            case 'start':
+            case 'startbath':
+                $startResult = $betService->startBathroomSession($arguments !== '' ? $arguments : null);
+                $reply = $startResult['message'];
+
+                if ($startResult['started']) {
+                    $reply .= "\n\n".$betService->openRound($chatId, $fromTelegramId);
+                    $round = $betService->openRoundForChat($chatId);
+                    if ($round) {
+                        $inlineKeyboard = $betService->roundInlineKeyboard($round->id);
+                    }
+                }
+                break;
+
+            case 'stop':
+            case 'endbath':
+                $stopResult = $betService->endBathroomSessionAndResolveResult($chatId);
+                $reply = $stopResult['message'];
+
+                if ($stopResult['status'] === TelegramBetService::STOP_RESULT_RESOLVED) {
+                    $reply .= "\n\n".$betService->leaderboard();
+                }
+                break;
+
+            case 'leaderboard':
+                $reply = $betService->leaderboard();
+                break;
+
+            case 'link':
+                $reply = $arguments === ''
+                    ? 'Specifica il codice: /link <codice>'
+                    : $telegramLinkService->linkFromTelegram($fromUser, $arguments);
+                break;
+
+            case 'help':
+                $reply = $betService->help();
+                break;
+
+            default:
+                $reply = 'Comando non riconosciuto. Usa /help.';
+                break;
         }
 
         $botService->sendMessage($chatId, $reply, $inlineKeyboard);
@@ -95,15 +130,21 @@ class TelegramWebhookController extends Controller
             return response()->json(['ok' => true]);
         }
 
-        $reply = $betService->placeBetForRound(
+        $result = $betService->placeBetForRoundResult(
             $chatId,
             is_array($callbackQuery['from'] ?? null) ? $callbackQuery['from'] : [],
             (int) $matches[1],
             strtolower($matches[2]),
         );
 
-        $botService->answerCallbackQuery($callbackQueryId, mb_substr($reply, 0, 180));
-        $botService->sendMessage($chatId, $reply);
+        $reply = $result['message'];
+        $showAlert = $result['status'] !== TelegramBetService::BET_RESULT_PLACED;
+
+        $botService->answerCallbackQuery($callbackQueryId, mb_substr($reply, 0, 180), $showAlert);
+
+        if ($result['status'] === TelegramBetService::BET_RESULT_PLACED) {
+            $botService->sendMessage($chatId, $reply);
+        }
 
         return response()->json(['ok' => true]);
     }

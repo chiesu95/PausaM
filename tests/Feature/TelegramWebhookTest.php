@@ -11,6 +11,10 @@ use Illuminate\Http\Client\Request as HttpRequest;
 use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\Http;
 
+beforeEach(function () {
+    config()->set('services.telegram.webhook_secret', null);
+});
+
 function telegramUpdate(string $text, int $userId = 1, string $username = 'user1', int $chatId = -100123): array
 {
     return [
@@ -80,7 +84,7 @@ test('newbet command creates an open round', function () {
         && data_get($request->data(), 'reply_markup.inline_keyboard.0.0.callback_data') === "bet:{$round->id}:under_15");
 });
 
-test('callback query places and updates bet from inline button', function () {
+test('callback query places bet once and prevents further changes', function () {
     config()->set('services.telegram.bot_token', 'test-token');
     Http::fake();
 
@@ -93,14 +97,23 @@ test('callback query places and updates bet from inline button', function () {
     $player = TelegramPlayer::query()->where('telegram_user_id', '7')->firstOrFail();
     $bet = Bet::query()->where('bet_round_id', $round->id)->where('telegram_player_id', $player->id)->firstOrFail();
 
-    expect($bet->choice)->toBe(BetOutcome::Under15);
+    expect($bet->choice)->toBe(BetOutcome::From15To30);
     expect($player->total_bets)->toBe(1);
 
     Http::assertSent(fn (HttpRequest $request) => str_contains($request->url(), '/answerCallbackQuery'));
+    Http::assertSent(fn (HttpRequest $request) => str_contains($request->url(), '/answerCallbackQuery')
+        && data_get($request->data(), 'show_alert') === true);
+
+    $sentMessages = collect(Http::recorded())
+        ->filter(fn (array $requestResponsePair) => str_contains($requestResponsePair[0]->url(), '/sendMessage'))
+        ->count();
+
+    expect($sentMessages)->toBe(2);
 });
 
 test('endbath resolves bets and updates leaderboard points', function () {
     Http::fake();
+    config()->set('services.telegram.bot_token', 'test-token');
     config()->set('services.telegram.points_per_win', 10);
     Carbon::setTestNow(Carbon::parse('2026-03-18 10:00:00'));
 
@@ -141,9 +154,14 @@ test('endbath resolves bets and updates leaderboard points', function () {
     expect($winnerBet->awarded_points)->toBe(10);
     expect($loserBet->is_winner)->toBeFalse();
     expect($loserBet->awarded_points)->toBe(0);
+
+    Http::assertSent(fn (HttpRequest $request) => str_contains($request->url(), '/sendMessage')
+        && str_contains((string) data_get($request->data(), 'text'), 'Sessione chiusa:')
+        && str_contains((string) data_get($request->data(), 'text'), 'Classifica punti:'));
 });
 
-test('start command works without a name', function () {
+test('start command works without a name and opens a round with inline buttons', function () {
+    config()->set('services.telegram.bot_token', 'test-token');
     Http::fake();
 
     $response = $this->postJson('/telegram/webhook', telegramUpdate('/start'));
@@ -151,9 +169,14 @@ test('start command works without a name', function () {
     $response->assertOk();
 
     $session = BathroomSession::query()->firstOrFail();
+    $round = BetRound::query()->open()->first();
 
     expect($session->person_name)->toBe('Persona');
     expect($session->ended_at)->toBeNull();
+    expect($round)->not()->toBeNull();
+
+    Http::assertSent(fn (HttpRequest $request) => str_contains($request->url(), '/sendMessage')
+        && data_get($request->data(), 'reply_markup.inline_keyboard.0.0.callback_data') === "bet:{$round->id}:under_15");
 });
 
 test('link command associates telegram account to a portal user', function () {

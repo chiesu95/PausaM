@@ -45,7 +45,7 @@ class TelegramBotService
         }
     }
 
-    public function answerCallbackQuery(string $callbackQueryId, ?string $text = null): void
+    public function answerCallbackQuery(string $callbackQueryId, ?string $text = null, bool $showAlert = false): void
     {
         $token = config('services.telegram.bot_token');
 
@@ -59,6 +59,10 @@ class TelegramBotService
 
         if ($text) {
             $payload['text'] = $text;
+        }
+
+        if ($showAlert) {
+            $payload['show_alert'] = true;
         }
 
         Http::timeout(10)->post(

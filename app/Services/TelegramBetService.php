@@ -11,6 +11,12 @@ use Illuminate\Support\Facades\DB;
 
 class TelegramBetService
 {
+    public const BET_RESULT_PLACED = 'placed';
+    public const BET_RESULT_ALREADY_PLACED = 'already_placed';
+    public const BET_RESULT_ERROR = 'error';
+    public const STOP_RESULT_RESOLVED = 'resolved';
+    public const STOP_RESULT_NO_ACTIVE_SESSION = 'no_active_session';
+
     public function openRound(string $chatId, ?string $openedByTelegramId): string
     {
         $activeRound = BetRound::query()
@@ -56,7 +62,7 @@ class TelegramBetService
             return 'Nessuna scommessa aperta. Avvia con /newbet.';
         }
 
-        return $this->placeBetForRound($chatId, $telegramUser, $round->id, $rawChoice);
+        return $this->placeBetForRoundResult($chatId, $telegramUser, $round->id, $rawChoice)['message'];
     }
 
     /**
@@ -64,14 +70,29 @@ class TelegramBetService
      */
     public function placeBetForRound(string $chatId, array $telegramUser, int $roundId, string $rawChoice): string
     {
+        return $this->placeBetForRoundResult($chatId, $telegramUser, $roundId, $rawChoice)['message'];
+    }
+
+    /**
+     * @param  array{id?: int|string, username?: string, first_name?: string, last_name?: string}  $telegramUser
+     * @return array{message: string, status: string}
+     */
+    public function placeBetForRoundResult(string $chatId, array $telegramUser, int $roundId, string $rawChoice): array
+    {
         if (! isset($telegramUser['id'])) {
-            return 'Impossibile identificare l\'utente Telegram per registrare la puntata.';
+            return [
+                'message' => 'Impossibile identificare l\'utente Telegram per registrare la puntata.',
+                'status' => self::BET_RESULT_ERROR,
+            ];
         }
 
         $choice = $this->resolveChoice($rawChoice);
 
         if (! $choice) {
-            return 'Opzione non valida. Usa: under15, 15-30, 30-45, over45 (oppure from 15 to 30, from 30 to 45).';
+            return [
+                'message' => 'Opzione non valida. Usa: under15, 15-30, 30-45, over45 (oppure from 15 to 30, from 30 to 45).',
+                'status' => self::BET_RESULT_ERROR,
+            ];
         }
 
         $round = BetRound::query()
@@ -80,11 +101,17 @@ class TelegramBetService
             ->first();
 
         if (! $round) {
-            return 'Round non trovato per questa chat.';
+            return [
+                'message' => 'Round non trovato per questa chat.',
+                'status' => self::BET_RESULT_ERROR,
+            ];
         }
 
         if ($round->status !== BetRound::STATUS_OPEN) {
-            return 'Questo round e gia chiuso. Aspetta il prossimo /newbet.';
+            return [
+                'message' => 'Questo round e gia chiuso. Aspetta il prossimo /newbet.',
+                'status' => self::BET_RESULT_ERROR,
+            ];
         }
 
         $player = $this->upsertPlayer($telegramUser);
@@ -95,10 +122,14 @@ class TelegramBetService
             ->first();
 
         if ($bet) {
-            $bet->choice = $choice;
-            $bet->save();
-
-            return sprintf('%s, puntata aggiornata: %s.', $this->displayName($player), $choice->label());
+            return [
+                'message' => sprintf(
+                    '%s, hai gia puntato su: %s. In questo round non puoi modificare la selezione.',
+                    $this->displayName($player),
+                    $bet->choice->label(),
+                ),
+                'status' => self::BET_RESULT_ALREADY_PLACED,
+            ];
         }
 
         Bet::query()->create([
@@ -109,7 +140,10 @@ class TelegramBetService
 
         $player->increment('total_bets');
 
-        return sprintf('%s ha puntato su: %s.', $this->displayName($player), $choice->label());
+        return [
+            'message' => sprintf('%s ha puntato su: %s.', $this->displayName($player), $choice->label()),
+            'status' => self::BET_RESULT_PLACED,
+        ];
     }
 
     public function openRoundForChat(string $chatId): ?BetRound
@@ -138,16 +172,22 @@ class TelegramBetService
         ];
     }
 
-    public function startBathroomSession(?string $personName = null): string
+    /**
+     * @return array{message: string, started: bool}
+     */
+    public function startBathroomSession(?string $personName = null): array
     {
         $activeSession = BathroomSession::query()->active()->latest('id')->first();
 
         if ($activeSession) {
-            return sprintf(
-                'C\'e gia una sessione attiva per %s iniziata alle %s.',
-                $activeSession->person_name,
-                $activeSession->started_at->format('H:i'),
-            );
+            return [
+                'message' => sprintf(
+                    'C\'e gia una sessione attiva per %s iniziata alle %s.',
+                    $activeSession->person_name,
+                    $activeSession->started_at->format('H:i'),
+                ),
+                'started' => false,
+            ];
         }
 
         $session = BathroomSession::query()->create([
@@ -155,14 +195,25 @@ class TelegramBetService
             'started_at' => now(),
         ]);
 
-        return sprintf(
-            'Sessione bagno avviata per %s alle %s. Apri una scommessa con /newbet.',
-            $session->person_name,
-            $session->started_at->format('H:i'),
-        );
+        return [
+            'message' => sprintf(
+                'Sessione bagno avviata per %s alle %s.',
+                $session->person_name,
+                $session->started_at->format('H:i'),
+            ),
+            'started' => true,
+        ];
     }
 
     public function endBathroomSessionAndResolve(string $chatId): string
+    {
+        return $this->endBathroomSessionAndResolveResult($chatId)['message'];
+    }
+
+    /**
+     * @return array{message: string, status: string}
+     */
+    public function endBathroomSessionAndResolveResult(string $chatId): array
     {
         return DB::transaction(function () use ($chatId) {
             $session = BathroomSession::query()
@@ -172,7 +223,10 @@ class TelegramBetService
                 ->first();
 
             if (! $session) {
-                return 'Non c\'e nessuna sessione bagno attiva. Usa /start.';
+                return [
+                    'message' => 'Non c\'e nessuna sessione bagno attiva. Usa /start.',
+                    'status' => self::STOP_RESULT_NO_ACTIVE_SESSION,
+                ];
             }
 
             $endedAt = now();
@@ -194,11 +248,14 @@ class TelegramBetService
                 ->first();
 
             if (! $round) {
-                return sprintf(
-                    'Sessione chiusa: %.2f minuti (%s). Nessuna scommessa aperta da risolvere.',
-                    $durationMinutes,
-                    $result->label(),
-                );
+                return [
+                    'message' => sprintf(
+                        'Sessione chiusa: %.2f minuti (%s). Nessuna scommessa aperta da risolvere.',
+                        $durationMinutes,
+                        $result->label(),
+                    ),
+                    'status' => self::STOP_RESULT_RESOLVED,
+                ];
             }
 
             $round->update([
@@ -236,18 +293,27 @@ class TelegramBetService
             );
 
             if ($round->bets->isEmpty()) {
-                return $summary."\n".'Nessuna puntata registrata.';
+                return [
+                    'message' => $summary."\n".'Nessuna puntata registrata.',
+                    'status' => self::STOP_RESULT_RESOLVED,
+                ];
             }
 
             if ($winners === []) {
-                return $summary."\n".'Nessun vincitore in questo round.';
+                return [
+                    'message' => $summary."\n".'Nessun vincitore in questo round.',
+                    'status' => self::STOP_RESULT_RESOLVED,
+                ];
             }
 
-            return $summary."\n".sprintf(
-                'Vincitori (+%d punti): %s',
-                $pointsPerWin,
-                implode(', ', $winners),
-            );
+            return [
+                'message' => $summary."\n".sprintf(
+                    'Vincitori (+%d punti): %s',
+                    $pointsPerWin,
+                    implode(', ', $winners),
+                ),
+                'status' => self::STOP_RESULT_RESOLVED,
+            ];
         });
     }
 
@@ -284,8 +350,8 @@ class TelegramBetService
     {
         return implode("\n", [
             'Comandi disponibili:',
-            '/start [nome] - avvia il timer bagno (nome opzionale)',
-            '/newbet - apre una nuova scommessa',
+            '/start [nome] - avvia il timer bagno (nome opzionale) e apre la scommessa',
+            '/newbet - apre una nuova scommessa (se ti serve senza /start)',
             '/bet <under15|15-30|30-45|over45> - piazza la puntata (accetta anche "from 15 to 30" ecc.)',
             '/stop - chiude timer e risolve la scommessa',
             '/link <codice> - collega account Telegram a utente portale',
