@@ -99,6 +99,7 @@ test('callback query places and updates bet from inline button', function () {
 
 test('endbath resolves bets and updates leaderboard points', function () {
     Http::fake();
+    config()->set('services.telegram.points_per_win', 10);
     Carbon::setTestNow(Carbon::parse('2026-03-18 10:00:00'));
 
     try {

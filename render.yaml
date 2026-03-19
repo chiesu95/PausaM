@@ -1,0 +1,60 @@
+services:
+  - type: web
+    name: bathroom-predict
+    runtime: docker
+    plan: free
+    autoDeploy: true
+    healthCheckPath: /up
+    envVars:
+      - key: APP_ENV
+        value: production
+      - key: APP_DEBUG
+        value: "false"
+      - key: APP_URL
+        sync: false
+      - key: APP_KEY
+        sync: false
+      - key: LOG_CHANNEL
+        value: stderr
+      - key: SESSION_DRIVER
+        value: database
+      - key: CACHE_STORE
+        value: database
+      - key: QUEUE_CONNECTION
+        value: database
+      - key: DB_CONNECTION
+        value: pgsql
+      - key: DB_HOST
+        fromDatabase:
+          name: bathroom-predict-db
+          property: host
+      - key: DB_PORT
+        fromDatabase:
+          name: bathroom-predict-db
+          property: port
+      - key: DB_DATABASE
+        fromDatabase:
+          name: bathroom-predict-db
+          property: database
+      - key: DB_USERNAME
+        fromDatabase:
+          name: bathroom-predict-db
+          property: user
+      - key: DB_PASSWORD
+        fromDatabase:
+          name: bathroom-predict-db
+          property: password
+      - key: TELEGRAM_BOT_TOKEN
+        sync: false
+      - key: TELEGRAM_WEBHOOK_SECRET
+        sync: false
+      - key: TELEGRAM_POINTS_PER_WIN
+        value: "10"
+      - key: RUN_MIGRATIONS
+        value: "true"
+      - key: RUN_FRESH_SEED_ON_FIRST_BOOT
+        value: "true"
+
+databases:
+  - name: bathroom-predict-db
+    plan: free

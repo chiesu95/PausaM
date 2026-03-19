@@ -20,7 +20,7 @@ class TelegramBetService
             ->first();
 
         if ($activeRound) {
-            return 'C\'e gia una scommessa aperta. Usa /bet <opzione> oppure /endbath per chiuderla.';
+            return 'C\'e gia una scommessa aperta. Usa /bet <opzione> oppure /stop per chiuderla.';
         }
 
         BetRound::query()->create([
@@ -172,7 +172,7 @@ class TelegramBetService
                 ->first();
 
             if (! $session) {
-                return 'Non c\'e nessuna sessione bagno attiva. Usa /startbath.';
+                return 'Non c\'e nessuna sessione bagno attiva. Usa /start.';
             }
 
             $endedAt = now();
