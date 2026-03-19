@@ -4,7 +4,9 @@ use App\Enums\BetOutcome;
 use App\Models\BathroomSession;
 use App\Models\Bet;
 use App\Models\BetRound;
+use App\Models\TelegramLinkCode;
 use App\Models\TelegramPlayer;
+use App\Models\User;
 use Illuminate\Http\Client\Request as HttpRequest;
 use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\Http;
@@ -152,4 +154,27 @@ test('start command works without a name', function () {
 
     expect($session->person_name)->toBe('Persona');
     expect($session->ended_at)->toBeNull();
+});
+
+test('link command associates telegram account to a portal user', function () {
+    config()->set('services.telegram.bot_token', 'test-token');
+    Http::fake();
+
+    $user = User::factory()->create();
+    $linkCode = TelegramLinkCode::query()->create([
+        'user_id' => $user->id,
+        'code' => 'ABCD1234EF',
+        'expires_at' => now()->addMinutes(10),
+    ]);
+
+    $response = $this->postJson('/telegram/webhook', telegramUpdate('/link ABCD1234EF', 777, 'linked_user'));
+
+    $response->assertOk();
+
+    $player = TelegramPlayer::query()->where('telegram_user_id', '777')->firstOrFail();
+    $linkCode->refresh();
+
+    expect($player->user_id)->toBe($user->id);
+    expect($linkCode->used_at)->not()->toBeNull();
+    expect($linkCode->used_by_telegram_player_id)->toBe($player->id);
 });

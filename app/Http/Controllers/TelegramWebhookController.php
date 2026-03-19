@@ -4,13 +4,18 @@ namespace App\Http\Controllers;
 
 use App\Services\TelegramBetService;
 use App\Services\TelegramBotService;
+use App\Services\TelegramLinkService;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 
 class TelegramWebhookController extends Controller
 {
-    public function __invoke(Request $request, TelegramBetService $betService, TelegramBotService $botService): JsonResponse
-    {
+    public function __invoke(
+        Request $request,
+        TelegramBetService $betService,
+        TelegramBotService $botService,
+        TelegramLinkService $telegramLinkService
+    ): JsonResponse {
         $configuredSecret = config('services.telegram.webhook_secret');
         $receivedSecret = $request->header('X-Telegram-Bot-Api-Secret-Token');
 
@@ -48,6 +53,12 @@ class TelegramWebhookController extends Controller
             'start', 'startbath' => $betService->startBathroomSession($arguments !== '' ? $arguments : null),
             'stop', 'endbath' => $betService->endBathroomSessionAndResolve($chatId),
             'leaderboard' => $betService->leaderboard(),
+            'link' => $arguments === ''
+                ? 'Specifica il codice: /link <codice>'
+                : $telegramLinkService->linkFromTelegram(
+                    is_array($message['from'] ?? null) ? $message['from'] : [],
+                    $arguments,
+                ),
             'help' => $betService->help(),
             default => 'Comando non riconosciuto. Usa /help.',
         };

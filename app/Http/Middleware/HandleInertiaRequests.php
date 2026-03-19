@@ -45,6 +45,11 @@ class HandleInertiaRequests extends Middleware
             'auth' => [
                 'user' => $request->user(),
             ],
+            'flash' => [
+                'status' => fn () => $request->session()->get('status'),
+                'telegramLinkCode' => fn () => $request->session()->get('telegram_link_code'),
+                'telegramLinkExpiresAt' => fn () => $request->session()->get('telegram_link_expires_at'),
+            ],
         ]);
     }
 }

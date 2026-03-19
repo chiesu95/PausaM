@@ -1,6 +1,7 @@
 <?php
 
 use App\Http\Controllers\DashboardController;
+use App\Http\Controllers\TelegramLinkCodeController;
 use App\Http\Controllers\TelegramWebhookController;
 use Illuminate\Support\Facades\Route;
 
@@ -13,6 +14,10 @@ Route::get('dashboard', DashboardController::class)
 Route::post('telegram/webhook', TelegramWebhookController::class)
     ->withoutMiddleware([\Illuminate\Foundation\Http\Middleware\ValidateCsrfToken::class])
     ->name('telegram.webhook');
+
+Route::post('telegram/link-code', [TelegramLinkCodeController::class, 'store'])
+    ->middleware(['auth', 'verified'])
+    ->name('telegram.link-code.store');
 
 require __DIR__.'/settings.php';
 require __DIR__.'/auth.php';

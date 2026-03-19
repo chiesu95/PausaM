@@ -20,6 +20,11 @@ export interface SharedData {
     name: string;
     quote: { message: string; author: string };
     auth: Auth;
+    flash: {
+        status?: string;
+        telegramLinkCode?: string;
+        telegramLinkExpiresAt?: string;
+    };
     ziggy: {
         location: string;
         url: string;

@@ -1,7 +1,8 @@
 <script setup lang="ts">
 import AppLayout from '@/layouts/AppLayout.vue';
-import { type BreadcrumbItem } from '@/types';
-import { Head } from '@inertiajs/vue3';
+import { type BreadcrumbItem, type SharedData } from '@/types';
+import { Head, useForm, usePage } from '@inertiajs/vue3';
+import { computed } from 'vue';
 
 const breadcrumbs: BreadcrumbItem[] = [
     {
@@ -43,7 +44,17 @@ defineProps<{
         winners: string[];
         betsCount: number;
     }>;
+    telegramLink: {
+        isLinked: boolean;
+        username: string | null;
+        fullName: string | null;
+        telegramUserId: string | null;
+    };
 }>();
+
+const page = usePage<SharedData>();
+const flash = computed(() => page.props.flash ?? {});
+const generateLinkCodeForm = useForm({});
 
 const formatDate = (date: string | null) => {
     if (!date) {
@@ -54,6 +65,10 @@ const formatDate = (date: string | null) => {
         dateStyle: 'short',
         timeStyle: 'short',
     });
+};
+
+const generateTelegramLinkCode = () => {
+    generateLinkCodeForm.post(route('telegram.link-code.store'));
 };
 </script>
 
@@ -81,7 +96,7 @@ const formatDate = (date: string | null) => {
                 </div>
             </div>
 
-            <div class="grid gap-4 lg:grid-cols-2">
+            <div class="grid gap-4 lg:grid-cols-3">
                 <div class="rounded-xl border border-sidebar-border/70 p-4 dark:border-sidebar-border">
                     <h2 class="text-lg font-semibold">Sessione bagno attiva</h2>
                     <p v-if="activeSession" class="mt-2 text-sm">
@@ -101,6 +116,42 @@ const formatDate = (date: string | null) => {
                     </div>
                     <p v-else class="mt-2 text-sm text-muted-foreground">Nessun round aperto.</p>
                 </div>
+
+                <div class="rounded-xl border border-sidebar-border/70 p-4 dark:border-sidebar-border">
+                    <h2 class="text-lg font-semibold">Collegamento Telegram</h2>
+                    <p v-if="telegramLink.isLinked" class="mt-2 text-sm">
+                        Collegato a:
+                        <span class="font-medium">
+                            {{ telegramLink.username ? `@${telegramLink.username}` : telegramLink.fullName }}
+                        </span>
+                    </p>
+                    <p v-else class="mt-2 text-sm text-muted-foreground">
+                        Account Telegram non collegato.
+                    </p>
+
+                    <div
+                        v-if="flash.telegramLinkCode"
+                        class="mt-3 rounded-md border border-emerald-500/40 bg-emerald-50/60 p-3 text-sm dark:bg-emerald-900/20"
+                    >
+                        <p class="font-medium">Codice: {{ flash.telegramLinkCode }}</p>
+                        <p class="mt-1 text-xs text-muted-foreground">
+                            Scade: {{ formatDate(flash.telegramLinkExpiresAt ?? null) }}
+                        </p>
+                        <p class="mt-1 text-xs text-muted-foreground">
+                            Usa nel gruppo o chat bot:
+                            <span class="font-mono">/link {{ flash.telegramLinkCode }}</span>
+                        </p>
+                    </div>
+
+                    <button
+                        type="button"
+                        class="mt-4 inline-flex items-center rounded-md bg-black px-3 py-2 text-sm font-medium text-white hover:bg-neutral-800 disabled:opacity-50 dark:bg-white dark:text-black dark:hover:bg-neutral-200"
+                        :disabled="generateLinkCodeForm.processing"
+                        @click="generateTelegramLinkCode"
+                    >
+                        {{ generateLinkCodeForm.processing ? 'Generazione...' : 'Genera codice link' }}
+                    </button>
+                </div>
             </div>
 
             <div class="grid gap-4 xl:grid-cols-2">
@@ -118,7 +169,11 @@ const formatDate = (date: string | null) => {
                                 </tr>
                             </thead>
                             <tbody>
-                                <tr v-for="(player, index) in leaderboard" :key="player.id" class="border-b border-sidebar-border/50 last:border-0 dark:border-sidebar-border/60">
+                                <tr
+                                    v-for="(player, index) in leaderboard"
+                                    :key="player.id"
+                                    class="border-b border-sidebar-border/50 last:border-0 dark:border-sidebar-border/60"
+                                >
                                     <td class="py-2">{{ index + 1 }}</td>
                                     <td class="py-2">
                                         {{ player.username ? `@${player.username}` : player.fullName }}
@@ -138,10 +193,10 @@ const formatDate = (date: string | null) => {
                     <div v-if="recentRounds.length" class="mt-4 space-y-3 text-sm">
                         <div v-for="round in recentRounds" :key="round.id" class="rounded-lg border border-sidebar-border/60 p-3 dark:border-sidebar-border">
                             <p class="font-medium">
-                                Round #{{ round.id }} · {{ round.resultLabel ?? 'Esito non disponibile' }}
+                                Round #{{ round.id }} - {{ round.resultLabel ?? 'Esito non disponibile' }}
                             </p>
                             <p class="text-muted-foreground">
-                                Durata: {{ round.durationMinutes ?? '-' }} min · Puntate: {{ round.betsCount }}
+                                Durata: {{ round.durationMinutes ?? '-' }} min - Puntate: {{ round.betsCount }}
                             </p>
                             <p class="text-muted-foreground">Risolto: {{ formatDate(round.resolvedAt) }}</p>
                             <p class="mt-1">

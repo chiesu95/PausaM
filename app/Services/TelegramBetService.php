@@ -288,6 +288,7 @@ class TelegramBetService
             '/newbet - apre una nuova scommessa',
             '/bet <under15|15-30|30-45|over45> - piazza la puntata (accetta anche "from 15 to 30" ecc.)',
             '/stop - chiude timer e risolve la scommessa',
+            '/link <codice> - collega account Telegram a utente portale',
             '/leaderboard - mostra la classifica punti',
         ]);
     }

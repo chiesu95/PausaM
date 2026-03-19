@@ -6,13 +6,17 @@ use App\Models\BathroomSession;
 use App\Models\Bet;
 use App\Models\BetRound;
 use App\Models\TelegramPlayer;
+use Illuminate\Http\Request;
 use Inertia\Inertia;
 use Inertia\Response;
 
 class DashboardController extends Controller
 {
-    public function __invoke(): Response
+    public function __invoke(Request $request): Response
     {
+        $user = $request->user();
+        $linkedTelegramPlayer = $user?->telegramPlayer()->first();
+
         $leaderboard = TelegramPlayer::query()
             ->orderByDesc('points')
             ->orderByDesc('wins')
@@ -86,6 +90,12 @@ class DashboardController extends Controller
             ] : null,
             'leaderboard' => $leaderboard,
             'recentRounds' => $recentRounds,
+            'telegramLink' => [
+                'isLinked' => $linkedTelegramPlayer !== null,
+                'username' => $linkedTelegramPlayer?->username,
+                'fullName' => $linkedTelegramPlayer?->full_name,
+                'telegramUserId' => $linkedTelegramPlayer?->telegram_user_id,
+            ],
         ]);
     }
 }

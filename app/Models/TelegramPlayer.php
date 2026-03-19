@@ -4,6 +4,7 @@ namespace App\Models;
 
 use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
+use Illuminate\Database\Eloquent\Relations\BelongsTo;
 use Illuminate\Database\Eloquent\Relations\HasMany;
 
 class TelegramPlayer extends Model
@@ -15,6 +16,7 @@ class TelegramPlayer extends Model
      * @var list<string>
      */
     protected $fillable = [
+        'user_id',
         'telegram_user_id',
         'username',
         'full_name',
@@ -40,5 +42,13 @@ class TelegramPlayer extends Model
     public function bets(): HasMany
     {
         return $this->hasMany(Bet::class);
+    }
+
+    /**
+     * @return BelongsTo<User, $this>
+     */
+    public function user(): BelongsTo
+    {
+        return $this->belongsTo(User::class);
     }
 }
