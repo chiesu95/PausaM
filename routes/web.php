@@ -11,6 +11,7 @@ Route::get('dashboard', DashboardController::class)
     ->name('dashboard');
 
 Route::post('telegram/webhook', TelegramWebhookController::class)
+    ->withoutMiddleware([\Illuminate\Foundation\Http\Middleware\ValidateCsrfToken::class])
     ->name('telegram.webhook');
 
 require __DIR__.'/settings.php';
