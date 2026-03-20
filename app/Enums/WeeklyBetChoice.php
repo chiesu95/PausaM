@@ -6,7 +6,7 @@ enum WeeklyBetChoice: string
 {
     case Under3Hours = 'under_3h';
     case Under4Hours = 'under_4h';
-    case Under5Hours = 'under_5h';
+    case Under6Hours = 'under_6h';
     case Over6Hours = 'over_6h';
 
     /**
@@ -23,10 +23,10 @@ enum WeeklyBetChoice: string
             'under 4h' => self::Under4Hours,
             'under_4h' => self::Under4Hours,
             'under 4 ore' => self::Under4Hours,
-            'under5h' => self::Under5Hours,
-            'under 5h' => self::Under5Hours,
-            'under_5h' => self::Under5Hours,
-            'under 5 ore' => self::Under5Hours,
+            'under6h' => self::Under6Hours,
+            'under 6h' => self::Under6Hours,
+            'under_6h' => self::Under6Hours,
+            'under 6 ore' => self::Under6Hours,
             'over6h' => self::Over6Hours,
             'over 6h' => self::Over6Hours,
             'over_6h' => self::Over6Hours,
@@ -48,7 +48,7 @@ enum WeeklyBetChoice: string
         return match ($this) {
             self::Under3Hours => 'under 3 ore',
             self::Under4Hours => 'under 4 ore',
-            self::Under5Hours => 'under 5 ore',
+            self::Under6Hours => 'under 6 ore',
             self::Over6Hours => 'over 6 ore',
         };
     }
@@ -56,9 +56,9 @@ enum WeeklyBetChoice: string
     public function isWinning(float $totalMinutes): bool
     {
         return match ($this) {
-            self::Under3Hours => $totalMinutes < 180,
-            self::Under4Hours => $totalMinutes < 240,
-            self::Under5Hours => $totalMinutes < 300,
+            self::Under3Hours => $totalMinutes <= 180,
+            self::Under4Hours => $totalMinutes > 180 && $totalMinutes <= 240,
+            self::Under6Hours => $totalMinutes > 240 && $totalMinutes <= 360,
             self::Over6Hours => $totalMinutes > 360,
         };
     }

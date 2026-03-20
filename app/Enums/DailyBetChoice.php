@@ -61,9 +61,9 @@ enum DailyBetChoice: string
     public function isWinning(float $totalMinutes): bool
     {
         return match ($this) {
-            self::Under30 => $totalMinutes < 30,
-            self::Under1Hour => $totalMinutes < 60,
-            self::Under1Hour30 => $totalMinutes < 90,
+            self::Under30 => $totalMinutes <= 30,
+            self::Under1Hour => $totalMinutes > 30 && $totalMinutes <= 60,
+            self::Under1Hour30 => $totalMinutes > 60 && $totalMinutes <= 90,
             self::Over1Hour30 => $totalMinutes > 90,
         };
     }

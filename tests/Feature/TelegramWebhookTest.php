@@ -1,7 +1,9 @@
 <?php
 
 use App\Enums\BetOutcome;
+use App\Enums\DailyBetChoice;
 use App\Enums\PeriodicBetType;
+use App\Enums\WeeklyBetChoice;
 use App\Models\BathroomSession;
 use App\Models\Bet;
 use App\Models\BetRound;
@@ -429,7 +431,7 @@ test('daily and weekly periodic bets use dedicated points config', function () {
 
     try {
         $this->postJson('/telegram/webhook', telegramUpdate('/dailybet under1h', 23, 'points_user'));
-        $this->postJson('/telegram/webhook', telegramUpdate('/weeklybet under5h', 23, 'points_user'));
+        $this->postJson('/telegram/webhook', telegramUpdate('/weeklybet under3h', 23, 'points_user'));
 
         BathroomSession::query()->create([
             'person_name' => 'A',
@@ -465,6 +467,26 @@ test('daily and weekly periodic bets use dedicated points config', function () {
     expect($player->points)->toBe(25);
     expect($player->wins)->toBe(2);
     expect($player->total_bets)->toBe(2);
+});
+
+test('daily and weekly bet ranges are exclusive between brackets', function () {
+    expect(DailyBetChoice::Under30->isWinning(29.99))->toBeTrue();
+    expect(DailyBetChoice::Under1Hour->isWinning(29.99))->toBeFalse();
+    expect(DailyBetChoice::Under1Hour->isWinning(45.0))->toBeTrue();
+    expect(DailyBetChoice::Under1Hour30->isWinning(45.0))->toBeFalse();
+    expect(DailyBetChoice::Under1Hour30->isWinning(75.0))->toBeTrue();
+    expect(DailyBetChoice::Over1Hour30->isWinning(75.0))->toBeFalse();
+    expect(DailyBetChoice::Under30->isWinning(30.0))->toBeFalse();
+    expect(DailyBetChoice::Under1Hour->isWinning(30.0))->toBeFalse();
+
+    expect(WeeklyBetChoice::Under3Hours->isWinning(170.0))->toBeTrue();
+    expect(WeeklyBetChoice::Under4Hours->isWinning(170.0))->toBeFalse();
+    expect(WeeklyBetChoice::Under4Hours->isWinning(200.0))->toBeTrue();
+    expect(WeeklyBetChoice::Under5Hours->isWinning(200.0))->toBeFalse();
+    expect(WeeklyBetChoice::Under5Hours->isWinning(260.0))->toBeTrue();
+    expect(WeeklyBetChoice::Over6Hours->isWinning(260.0))->toBeFalse();
+    expect(WeeklyBetChoice::Under3Hours->isWinning(180.0))->toBeFalse();
+    expect(WeeklyBetChoice::Under4Hours->isWinning(180.0))->toBeFalse();
 });
 
 test('dailytotal command returns summed time for current day', function () {
