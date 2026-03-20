@@ -43,6 +43,10 @@ return [
         'points_per_win_weekly' => env('TELEGRAM_POINTS_PER_WIN_WEEKLY', env('TELEGRAM_POINTS_PER_WIN', 10)),
         'link_code_ttl_minutes' => env('TELEGRAM_LINK_CODE_TTL_MINUTES', 15),
         'bet_timezone' => env('TELEGRAM_BET_TIMEZONE', 'Europe/Rome'),
+        'scheduled_chat_ids' => array_values(array_filter(array_map(
+            'trim',
+            explode(',', (string) env('TELEGRAM_SCHEDULED_CHAT_IDS', '')),
+        ))),
     ],
 
 ];

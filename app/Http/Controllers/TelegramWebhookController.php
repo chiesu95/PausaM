@@ -47,28 +47,36 @@ class TelegramWebhookController extends Controller
         $fromUser = is_array($message['from'] ?? null) ? $message['from'] : [];
         $fromTelegramId = isset($fromUser['id']) ? (string) $fromUser['id'] : null;
         $reply = '';
+        $shouldPinRoundMessage = false;
+        $shouldPinDailyMessage = false;
+        $shouldPinWeeklyMessage = false;
+        $shouldUnpinRoundMessage = false;
 
         $betService->resolveExpiredPeriodicBetsForChat($chatId);
 
         switch ($command) {
             case 'newbet':
+                $hadOpenRound = $betService->openRoundForChat($chatId) !== null;
                 $reply = $betService->openRound($chatId, $fromTelegramId);
                 $round = $betService->openRoundForChat($chatId);
                 if ($round) {
                     $inlineKeyboard = $betService->roundInlineKeyboard($round->id);
+                    $shouldPinRoundMessage = ! $hadOpenRound;
                 }
                 break;
 
             case 'bet':
                 $reply = $arguments === ''
-                    ? 'Specifica una puntata: /bet <under15|15-30|30-45|over45>.'
+                    ? 'Specifica una puntata: under15, 15-30, 30-45 oppure over45.'
                     : $betService->placeBet($chatId, $fromUser, $arguments);
                 break;
 
             case 'dailybet':
                 if ($arguments === '') {
-                    $reply = 'Scegli la dailybet (valida solo prima delle 09:30):';
-                    $inlineKeyboard = $betService->dailyBetInlineKeyboard();
+                    $dailyPromptState = $betService->dailyBetPromptStateForChat($chatId);
+                    $reply = $dailyPromptState['message'];
+                    $inlineKeyboard = $dailyPromptState['show_keyboard'] ? $betService->dailyBetInlineKeyboard() : null;
+                    $shouldPinDailyMessage = $dailyPromptState['show_keyboard'];
                     break;
                 }
 
@@ -77,8 +85,10 @@ class TelegramWebhookController extends Controller
 
             case 'weeklybet':
                 if ($arguments === '') {
-                    $reply = 'Scegli la weeklybet (valida entro lunedi alle 12:00):';
-                    $inlineKeyboard = $betService->weeklyBetInlineKeyboard();
+                    $weeklyPromptState = $betService->weeklyBetPromptStateForChat($chatId);
+                    $reply = $weeklyPromptState['message'];
+                    $inlineKeyboard = $weeklyPromptState['show_keyboard'] ? $betService->weeklyBetInlineKeyboard() : null;
+                    $shouldPinWeeklyMessage = $weeklyPromptState['show_keyboard'];
                     break;
                 }
 
@@ -95,6 +105,7 @@ class TelegramWebhookController extends Controller
 
             case 'start':
             case 'startbath':
+                $hadOpenRound = $betService->openRoundForChat($chatId) !== null;
                 $startResult = $betService->startBathroomSession($arguments !== '' ? $arguments : null);
                 $reply = $startResult['message'];
 
@@ -103,6 +114,7 @@ class TelegramWebhookController extends Controller
                     $round = $betService->openRoundForChat($chatId);
                     if ($round) {
                         $inlineKeyboard = $betService->roundInlineKeyboard($round->id);
+                        $shouldPinRoundMessage = ! $hadOpenRound;
                     }
                 }
                 break;
@@ -114,6 +126,7 @@ class TelegramWebhookController extends Controller
 
                 if ($stopResult['status'] === TelegramBetService::STOP_RESULT_RESOLVED) {
                     $reply .= "\n\n".$betService->leaderboard();
+                    $shouldUnpinRoundMessage = true;
                 }
                 break;
 
@@ -136,7 +149,25 @@ class TelegramWebhookController extends Controller
                 break;
         }
 
-        $botService->sendMessage($chatId, $reply, $inlineKeyboard);
+        $messageId = $botService->sendMessage($chatId, $reply, $inlineKeyboard);
+
+        if ($messageId !== null) {
+            if ($shouldPinRoundMessage) {
+                $betService->pinRoundMessageForChat($chatId, $messageId, $botService);
+            }
+
+            if ($shouldPinDailyMessage) {
+                $betService->pinDailyMessageForCurrentDate($chatId, $messageId, $botService);
+            }
+
+            if ($shouldPinWeeklyMessage) {
+                $betService->pinWeeklyMessageForCurrentWeek($chatId, $messageId, $botService);
+            }
+        }
+
+        if ($shouldUnpinRoundMessage) {
+            $betService->unpinRoundMessageForChat($chatId, $botService);
+        }
 
         return response()->json(['ok' => true]);
     }

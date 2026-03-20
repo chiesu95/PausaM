@@ -10,6 +10,7 @@ use App\Models\BathroomSession;
 use App\Models\Bet;
 use App\Models\BetRound;
 use App\Models\PeriodicBet;
+use App\Models\TelegramChatState;
 use App\Models\TelegramPlayer;
 use Carbon\CarbonImmutable;
 use Carbon\CarbonInterface;
@@ -36,7 +37,11 @@ class TelegramBetService
             ->first();
 
         if ($activeRound) {
-            return 'C\'e gia una scommessa aperta. Usa /bet <opzione> oppure /stop per chiuderla.';
+            if ($this->allKnownPlayersPlacedRound($activeRound)) {
+                return 'Tutti i giocatori hanno scommesso.';
+            }
+
+            return 'C\'e gia una scommessa aperta. Usa i pulsanti del messaggio attivo oppure /stop per chiuderla.';
         }
 
         BetRound::query()->create([
@@ -51,8 +56,8 @@ class TelegramBetService
             '- from 15 to 30',
             '- from 30 to 45',
             '- over 45',
-            'Punta con: /bet <opzione>',
-            'Shortcut validi: under15, 15-30, 30-45, over45',
+            'Punta con i pulsanti qui sotto.',
+            'Shortcut testuali opzionali: under15, 15-30, 30-45, over45',
             'Tracciamento: /start [nome-opzionale] e /stop',
         ]);
     }
@@ -149,6 +154,248 @@ class TelegramBetService
         ];
     }
 
+    public function dailyBetPromptMessage(): string
+    {
+        return 'Scegli la dailybet (valida solo prima delle 09:30):';
+    }
+
+    public function weeklyBetPromptMessage(): string
+    {
+        return 'Scegli la weeklybet (valida entro lunedi alle 12:00):';
+    }
+
+    /**
+     * @return array{message: string, show_keyboard: bool}
+     */
+    public function dailyBetPromptStateForChat(string $chatId): array
+    {
+        $nowLocal = $this->nowInBetTimezone();
+        [$periodStart] = $this->periodBoundsForType(PeriodicBetType::Daily, $nowLocal);
+        $cutoff = $this->betCutoffForType(PeriodicBetType::Daily, $periodStart);
+
+        if ($nowLocal->greaterThanOrEqualTo($cutoff)) {
+            return [
+                'message' => 'Tempo limite raggiunto per la dailybet, scommetti domani',
+                'show_keyboard' => false,
+            ];
+        }
+
+        if ($this->allKnownPlayersPlacedPeriodicBet($chatId, PeriodicBetType::Daily, $periodStart->toDateString())) {
+            return [
+                'message' => 'Tutti i giocatori hanno scommesso.',
+                'show_keyboard' => false,
+            ];
+        }
+
+        return [
+            'message' => $this->dailyBetPromptMessage(),
+            'show_keyboard' => true,
+        ];
+    }
+
+    /**
+     * @return array{message: string, show_keyboard: bool}
+     */
+    public function weeklyBetPromptStateForChat(string $chatId): array
+    {
+        $nowLocal = $this->nowInBetTimezone();
+        [$periodStart] = $this->periodBoundsForType(PeriodicBetType::Weekly, $nowLocal);
+        $cutoff = $this->betCutoffForType(PeriodicBetType::Weekly, $periodStart);
+
+        if ($nowLocal->greaterThanOrEqualTo($cutoff)) {
+            return [
+                'message' => 'Tempo limite raggiunto per la weeklybet, scommetti la prossima settimana',
+                'show_keyboard' => false,
+            ];
+        }
+
+        if ($this->allKnownPlayersPlacedPeriodicBet($chatId, PeriodicBetType::Weekly, $periodStart->toDateString())) {
+            return [
+                'message' => 'Tutti i giocatori hanno scommesso.',
+                'show_keyboard' => false,
+            ];
+        }
+
+        return [
+            'message' => $this->weeklyBetPromptMessage(),
+            'show_keyboard' => true,
+        ];
+    }
+
+    /**
+     * @return list<string>
+     */
+    public function scheduledChatIds(): array
+    {
+        $configuredChatIds = config('services.telegram.scheduled_chat_ids', []);
+
+        if (is_string($configuredChatIds)) {
+            $configuredChatIds = array_filter(
+                array_map('trim', explode(',', $configuredChatIds)),
+            );
+        }
+
+        if (! is_array($configuredChatIds)) {
+            $configuredChatIds = [];
+        }
+
+        $fromRounds = BetRound::query()
+            ->select('telegram_chat_id')
+            ->distinct()
+            ->pluck('telegram_chat_id')
+            ->all();
+
+        $fromPeriodicBets = PeriodicBet::query()
+            ->select('telegram_chat_id')
+            ->distinct()
+            ->pluck('telegram_chat_id')
+            ->all();
+
+        $fromChatStates = TelegramChatState::query()
+            ->select('telegram_chat_id')
+            ->distinct()
+            ->pluck('telegram_chat_id')
+            ->all();
+
+        return array_values(
+            array_unique(
+                array_filter(
+                    array_map('strval', array_merge(
+                        $configuredChatIds,
+                        $fromRounds,
+                        $fromPeriodicBets,
+                        $fromChatStates,
+                    )),
+                    static fn (string $chatId): bool => $chatId !== '',
+                ),
+            ),
+        );
+    }
+
+    public function pinRoundMessageForChat(string $chatId, int $messageId, TelegramBotService $botService): void
+    {
+        if (! $botService->pinMessage($chatId, $messageId)) {
+            return;
+        }
+
+        $state = $this->chatStateForChat($chatId);
+        $previousMessageId = $state->pinned_round_message_id;
+
+        $state->update([
+            'pinned_round_message_id' => $messageId,
+        ]);
+
+        if ($previousMessageId && $previousMessageId !== $messageId) {
+            $botService->unpinMessage($chatId, $previousMessageId);
+        }
+    }
+
+    public function unpinRoundMessageForChat(string $chatId, TelegramBotService $botService): void
+    {
+        $state = TelegramChatState::query()
+            ->where('telegram_chat_id', $chatId)
+            ->first();
+
+        if (! $state || ! $state->pinned_round_message_id) {
+            return;
+        }
+
+        $botService->unpinMessage($chatId, (int) $state->pinned_round_message_id);
+
+        $state->update([
+            'pinned_round_message_id' => null,
+        ]);
+    }
+
+    public function pinDailyMessageForCurrentDate(string $chatId, int $messageId, TelegramBotService $botService): void
+    {
+        if (! $botService->pinMessage($chatId, $messageId)) {
+            return;
+        }
+
+        $state = $this->chatStateForChat($chatId);
+        $previousMessageId = $state->pinned_daily_message_id;
+
+        $state->update([
+            'pinned_daily_message_id' => $messageId,
+            'pinned_daily_for_date' => $this->nowInBetTimezone()->toDateString(),
+        ]);
+
+        if ($previousMessageId && $previousMessageId !== $messageId) {
+            $botService->unpinMessage($chatId, $previousMessageId);
+        }
+    }
+
+    public function unpinDailyMessageIfExpired(string $chatId, TelegramBotService $botService): void
+    {
+        $state = TelegramChatState::query()
+            ->where('telegram_chat_id', $chatId)
+            ->first();
+
+        if (! $state || ! $state->pinned_daily_message_id) {
+            return;
+        }
+
+        $today = $this->nowInBetTimezone()->toDateString();
+        $pinnedDate = $state->pinned_daily_for_date?->toDateString();
+
+        if ($pinnedDate !== null && $pinnedDate > $today) {
+            return;
+        }
+
+        $botService->unpinMessage($chatId, (int) $state->pinned_daily_message_id);
+
+        $state->update([
+            'pinned_daily_message_id' => null,
+            'pinned_daily_for_date' => null,
+        ]);
+    }
+
+    public function pinWeeklyMessageForCurrentWeek(string $chatId, int $messageId, TelegramBotService $botService): void
+    {
+        if (! $botService->pinMessage($chatId, $messageId)) {
+            return;
+        }
+
+        $state = $this->chatStateForChat($chatId);
+        $previousMessageId = $state->pinned_weekly_message_id;
+        $currentWeekStart = $this->nowInBetTimezone()->startOfWeek(CarbonInterface::MONDAY)->toDateString();
+
+        $state->update([
+            'pinned_weekly_message_id' => $messageId,
+            'pinned_weekly_for_week_start_date' => $currentWeekStart,
+        ]);
+
+        if ($previousMessageId && $previousMessageId !== $messageId) {
+            $botService->unpinMessage($chatId, $previousMessageId);
+        }
+    }
+
+    public function unpinWeeklyMessageIfExpired(string $chatId, TelegramBotService $botService): void
+    {
+        $state = TelegramChatState::query()
+            ->where('telegram_chat_id', $chatId)
+            ->first();
+
+        if (! $state || ! $state->pinned_weekly_message_id) {
+            return;
+        }
+
+        $currentWeekStart = $this->nowInBetTimezone()->startOfWeek(CarbonInterface::MONDAY)->toDateString();
+        $pinnedWeekStart = $state->pinned_weekly_for_week_start_date?->toDateString();
+
+        if ($pinnedWeekStart !== null && $pinnedWeekStart > $currentWeekStart) {
+            return;
+        }
+
+        $botService->unpinMessage($chatId, (int) $state->pinned_weekly_message_id);
+
+        $state->update([
+            'pinned_weekly_message_id' => null,
+            'pinned_weekly_for_week_start_date' => null,
+        ]);
+    }
+
     public function dailyTotalMessage(string $chatId): string
     {
         $this->resolveExpiredPeriodicBetsForChat($chatId);
@@ -204,7 +451,7 @@ class TelegramBetService
             ->first();
 
         if (! $round) {
-            return 'Nessuna scommessa aperta. Avvia con /newbet.';
+            return 'Nessuna scommessa aperta. Avvia con /start.';
         }
 
         return $this->placeBetForRoundResult($chatId, $telegramUser, $round->id, $rawChoice)['message'];
@@ -254,7 +501,7 @@ class TelegramBetService
 
         if ($round->status !== BetRound::STATUS_OPEN) {
             return [
-                'message' => 'Questo round e gia chiuso. Aspetta il prossimo /newbet.',
+                'message' => 'Sessione già conclusa.',
                 'status' => self::BET_RESULT_ERROR,
             ];
         }
@@ -267,6 +514,13 @@ class TelegramBetService
             ->first();
 
         if ($bet) {
+            if ($this->allKnownPlayersPlacedRound($round)) {
+                return [
+                    'message' => 'Tutti i giocatori hanno scommesso.',
+                    'status' => self::BET_RESULT_ALREADY_PLACED,
+                ];
+            }
+
             return [
                 'message' => sprintf(
                     '%s, hai gia puntato su: %s. In questo round non puoi modificare la selezione.',
@@ -284,6 +538,13 @@ class TelegramBetService
         ]);
 
         $player->increment('total_bets');
+
+        if ($this->allKnownPlayersPlacedRound($round)) {
+            return [
+                'message' => 'Tutti i giocatori hanno scommesso.',
+                'status' => self::BET_RESULT_PLACED,
+            ];
+        }
 
         return [
             'message' => sprintf('%s ha puntato su: %s.', $this->displayName($player), $choice->label()),
@@ -472,7 +733,7 @@ class TelegramBetService
             ->get();
 
         if ($rows->isEmpty()) {
-            return 'Classifica vuota. Crea una scommessa con /newbet.';
+            return 'Classifica vuota. Avvia una sessione con /start.';
         }
 
         $lines = ['Classifica punti:'];
@@ -496,10 +757,9 @@ class TelegramBetService
         return implode("\n", [
             'Comandi disponibili:',
             '/start [nome] - avvia il timer bagno (nome opzionale) e apre la scommessa',
-            '/newbet - apre una nuova scommessa (se ti serve senza /start)',
-            '/bet <under15|15-30|30-45|over45> - piazza la puntata (accetta anche "from 15 to 30" ecc.)',
             '/dailybet <under30|under1h|under1h30|over1h30> - bet sul totale giornaliero (entro le 09:30)',
             '/weeklybet <under3h|under4h|under5h|over6h> - bet sul totale settimanale (entro lunedi 12:00)',
+            'Le puntate del round si fanno dai pulsanti del messaggio aperto con /start.',
             '/dailytotal - totale tempo bagno della giornata corrente',
             '/weeklytotal - totale settimana corrente e precedente (lunedi-domenica)',
             '/stop - chiude timer e risolve la scommessa',
@@ -631,8 +891,8 @@ class TelegramBetService
         if ($nowLocal->greaterThanOrEqualTo($cutoff)) {
             return [
                 'message' => match ($type) {
-                    PeriodicBetType::Daily => 'Tempo scaduto: la dailybet si puo piazzare solo prima delle 09:30.',
-                    PeriodicBetType::Weekly => 'Tempo scaduto: la weeklybet si puo piazzare solo entro lunedi alle 12:00.',
+                    PeriodicBetType::Daily => 'Tempo limite raggiunto per la dailybet, scommetti domani',
+                    PeriodicBetType::Weekly => 'Tempo limite raggiunto per la weeklybet, scommetti la prossima settimana',
                 },
                 'status' => self::BET_RESULT_ERROR,
             ];
@@ -649,6 +909,13 @@ class TelegramBetService
             ->first();
 
         if ($existingBet) {
+            if ($this->allKnownPlayersPlacedPeriodicBet($chatId, $type, $periodDate)) {
+                return [
+                    'message' => 'Tutti i giocatori hanno scommesso.',
+                    'status' => self::BET_RESULT_ALREADY_PLACED,
+                ];
+            }
+
             return [
                 'message' => sprintf(
                     '%s, hai gia piazzato la bet %s su: %s.',
@@ -668,6 +935,13 @@ class TelegramBetService
             'choice' => $choiceValue,
         ]);
         $player->increment('total_bets');
+
+        if ($this->allKnownPlayersPlacedPeriodicBet($chatId, $type, $periodDate)) {
+            return [
+                'message' => 'Tutti i giocatori hanno scommesso.',
+                'status' => self::BET_RESULT_PLACED,
+            ];
+        }
 
         $periodLabel = match ($type) {
             PeriodicBetType::Daily => sprintf('giorno %s', $periodStart->format('d/m/Y')),
@@ -786,5 +1060,89 @@ class TelegramBetService
                 config('services.telegram.points_per_win', 10),
             ),
         };
+    }
+
+    protected function chatStateForChat(string $chatId): TelegramChatState
+    {
+        return TelegramChatState::query()->firstOrCreate([
+            'telegram_chat_id' => $chatId,
+        ]);
+    }
+
+    protected function allKnownPlayersPlacedRound(BetRound $round): bool
+    {
+        $knownPlayerIds = $this->knownPlayerIdsForChat($round->telegram_chat_id);
+
+        if (count($knownPlayerIds) < 2) {
+            return false;
+        }
+
+        $roundPlayerIds = Bet::query()
+            ->where('bet_round_id', $round->id)
+            ->distinct()
+            ->pluck('telegram_player_id')
+            ->map(fn (mixed $id): int => (int) $id)
+            ->all();
+
+        $roundPlayerLookup = array_flip($roundPlayerIds);
+
+        foreach ($knownPlayerIds as $knownPlayerId) {
+            if (! isset($roundPlayerLookup[$knownPlayerId])) {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    protected function allKnownPlayersPlacedPeriodicBet(string $chatId, PeriodicBetType $type, string $periodStartDate): bool
+    {
+        $knownPlayerIds = $this->knownPlayerIdsForChat($chatId);
+
+        if (count($knownPlayerIds) < 2) {
+            return false;
+        }
+
+        $periodPlayerIds = PeriodicBet::query()
+            ->where('telegram_chat_id', $chatId)
+            ->where('type', $type)
+            ->whereDate('period_start_date', $periodStartDate)
+            ->distinct()
+            ->pluck('telegram_player_id')
+            ->map(fn (mixed $id): int => (int) $id)
+            ->all();
+
+        $periodPlayerLookup = array_flip($periodPlayerIds);
+
+        foreach ($knownPlayerIds as $knownPlayerId) {
+            if (! isset($periodPlayerLookup[$knownPlayerId])) {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    /**
+     * @return list<int>
+     */
+    protected function knownPlayerIdsForChat(string $chatId): array
+    {
+        $roundPlayerIds = Bet::query()
+            ->join('bet_rounds', 'bet_rounds.id', '=', 'bets.bet_round_id')
+            ->where('bet_rounds.telegram_chat_id', $chatId)
+            ->distinct()
+            ->pluck('bets.telegram_player_id')
+            ->map(fn (mixed $id): int => (int) $id)
+            ->all();
+
+        $periodicPlayerIds = PeriodicBet::query()
+            ->where('telegram_chat_id', $chatId)
+            ->distinct()
+            ->pluck('telegram_player_id')
+            ->map(fn (mixed $id): int => (int) $id)
+            ->all();
+
+        return array_values(array_unique(array_merge($roundPlayerIds, $periodicPlayerIds)));
     }
 }

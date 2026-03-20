@@ -6,6 +6,7 @@ use App\Models\BathroomSession;
 use App\Models\Bet;
 use App\Models\BetRound;
 use App\Models\PeriodicBet;
+use App\Models\TelegramChatState;
 use App\Models\TelegramLinkCode;
 use App\Models\TelegramPlayer;
 use App\Models\User;
@@ -114,6 +115,26 @@ test('callback query places bet once and prevents further changes', function () 
     expect($sentMessages)->toBe(2);
 });
 
+test('round bet returns all players message when all known players have placed a bet', function () {
+    config()->set('services.telegram.bot_token', 'test-token');
+    Http::fake();
+
+    $this->postJson('/telegram/webhook', telegramUpdate('/newbet'));
+    $firstRound = BetRound::query()->open()->firstOrFail();
+
+    $this->postJson('/telegram/webhook', telegramUpdate('/bet under15', 71, 'p1'));
+    $this->postJson('/telegram/webhook', telegramUpdate('/bet 15-30', 72, 'p2'));
+
+    $firstRound->update(['status' => BetRound::STATUS_RESOLVED]);
+
+    $this->postJson('/telegram/webhook', telegramUpdate('/newbet'));
+    $this->postJson('/telegram/webhook', telegramUpdate('/bet under15', 71, 'p1'));
+    $this->postJson('/telegram/webhook', telegramUpdate('/bet 15-30', 72, 'p2'));
+
+    Http::assertSent(fn (HttpRequest $request) => str_contains($request->url(), '/sendMessage')
+        && data_get($request->data(), 'text') === 'Tutti i giocatori hanno scommesso.');
+});
+
 test('endbath resolves bets and updates leaderboard points', function () {
     Http::fake();
     config()->set('services.telegram.bot_token', 'test-token');
@@ -182,6 +203,105 @@ test('start command works without a name and opens a round with inline buttons',
         && data_get($request->data(), 'reply_markup.inline_keyboard.0.0.callback_data') === "bet:{$round->id}:under_15");
 });
 
+test('start command pins the active round message when telegram returns message id', function () {
+    config()->set('services.telegram.bot_token', 'test-token');
+    Http::fake([
+        'https://api.telegram.org/*/sendMessage' => Http::response([
+            'ok' => true,
+            'result' => ['message_id' => 701],
+        ], 200),
+        'https://api.telegram.org/*/pinChatMessage' => Http::response(['ok' => true], 200),
+    ]);
+
+    $this->postJson('/telegram/webhook', telegramUpdate('/start'));
+
+    $chatState = TelegramChatState::query()->where('telegram_chat_id', '-100123')->firstOrFail();
+
+    expect($chatState->pinned_round_message_id)->toBe(701);
+
+    Http::assertSent(fn (HttpRequest $request) => str_contains($request->url(), '/pinChatMessage')
+        && data_get($request->data(), 'message_id') === 701);
+});
+
+test('stop command unpins the active round message', function () {
+    config()->set('services.telegram.bot_token', 'test-token');
+    Http::fake([
+        'https://api.telegram.org/*/sendMessage' => Http::sequence()
+            ->push(['ok' => true, 'result' => ['message_id' => 801]], 200)
+            ->push(['ok' => true, 'result' => ['message_id' => 802]], 200),
+        'https://api.telegram.org/*/pinChatMessage' => Http::response(['ok' => true], 200),
+        'https://api.telegram.org/*/unpinChatMessage' => Http::response(['ok' => true], 200),
+    ]);
+    Carbon::setTestNow(Carbon::parse('2026-03-18 10:00:00', 'UTC'));
+
+    try {
+        $this->postJson('/telegram/webhook', telegramUpdate('/start'));
+        Carbon::setTestNow(now()->addMinutes(18));
+        $this->postJson('/telegram/webhook', telegramUpdate('/stop'));
+    } finally {
+        Carbon::setTestNow();
+    }
+
+    $chatState = TelegramChatState::query()->where('telegram_chat_id', '-100123')->firstOrFail();
+
+    expect($chatState->pinned_round_message_id)->toBeNull();
+
+    Http::assertSent(fn (HttpRequest $request) => str_contains($request->url(), '/unpinChatMessage')
+        && data_get($request->data(), 'message_id') === 801);
+});
+
+test('callback bet on a closed round returns session already concluded message', function () {
+    config()->set('services.telegram.bot_token', 'test-token');
+    Http::fake();
+
+    $round = BetRound::query()->create([
+        'telegram_chat_id' => '-100123',
+        'status' => BetRound::STATUS_RESOLVED,
+    ]);
+
+    $this->postJson('/telegram/webhook', telegramCallbackUpdate("bet:{$round->id}:under_15", $round->id, 88, 'closed_round_user'));
+
+    Http::assertSent(fn (HttpRequest $request) => str_contains($request->url(), '/answerCallbackQuery')
+        && str_contains((string) data_get($request->data(), 'text'), 'Sessione già conclusa'));
+});
+
+test('scheduled daily commands send, pin and unpin daily bet message', function () {
+    config()->set('services.telegram.bot_token', 'test-token');
+    Carbon::setTestNow(Carbon::parse('2026-03-20 08:30:00', 'UTC'));
+    BetRound::query()->create([
+        'telegram_chat_id' => '-100555',
+        'opened_by_telegram_id' => '123',
+    ]);
+    Http::fake([
+        'https://api.telegram.org/*/sendMessage' => Http::response([
+            'ok' => true,
+            'result' => ['message_id' => 901],
+        ], 200),
+        'https://api.telegram.org/*/pinChatMessage' => Http::response(['ok' => true], 200),
+        'https://api.telegram.org/*/unpinChatMessage' => Http::response(['ok' => true], 200),
+    ]);
+
+    try {
+        $this->artisan('telegram:bets:open-daily')->assertExitCode(0);
+        $this->artisan('telegram:bets:unpin-daily')->assertExitCode(0);
+    } finally {
+        Carbon::setTestNow();
+    }
+
+    $chatState = TelegramChatState::query()->where('telegram_chat_id', '-100555')->firstOrFail();
+
+    expect($chatState->pinned_daily_message_id)->toBeNull();
+    expect($chatState->pinned_daily_for_date)->toBeNull();
+
+    Http::assertSent(fn (HttpRequest $request) => str_contains($request->url(), '/sendMessage')
+        && data_get($request->data(), 'chat_id') === '-100555'
+        && data_get($request->data(), 'reply_markup.inline_keyboard.0.0.callback_data') === 'dailybet:under_30');
+    Http::assertSent(fn (HttpRequest $request) => str_contains($request->url(), '/pinChatMessage')
+        && data_get($request->data(), 'message_id') === 901);
+    Http::assertSent(fn (HttpRequest $request) => str_contains($request->url(), '/unpinChatMessage')
+        && data_get($request->data(), 'message_id') === 901);
+});
+
 test('link command associates telegram account to a portal user', function () {
     config()->set('services.telegram.bot_token', 'test-token');
     Http::fake();
@@ -228,15 +348,20 @@ test('dailybet places a bet before cutoff and rejects bets after 09:30', functio
     expect(PeriodicBet::query()->count())->toBe(1);
 
     Http::assertSent(fn (HttpRequest $request) => str_contains($request->url(), '/sendMessage')
-        && str_contains((string) data_get($request->data(), 'text'), 'Tempo scaduto'));
+        && str_contains((string) data_get($request->data(), 'text'), 'Tempo limite raggiunto per la dailybet, scommetti domani'));
 });
 
 test('dailybet and weeklybet commands without options send inline buttons', function () {
     config()->set('services.telegram.bot_token', 'test-token');
     Http::fake();
+    Carbon::setTestNow(Carbon::parse('2026-03-16 09:00:00', 'UTC'));
 
-    $this->postJson('/telegram/webhook', telegramUpdate('/dailybet', 13, 'buttons_user'));
-    $this->postJson('/telegram/webhook', telegramUpdate('/weeklybet', 13, 'buttons_user'));
+    try {
+        $this->postJson('/telegram/webhook', telegramUpdate('/dailybet', 13, 'buttons_user'));
+        $this->postJson('/telegram/webhook', telegramUpdate('/weeklybet', 13, 'buttons_user'));
+    } finally {
+        Carbon::setTestNow();
+    }
 
     Http::assertSent(fn (HttpRequest $request) => str_contains($request->url(), '/sendMessage')
         && data_get($request->data(), 'reply_markup.inline_keyboard.0.0.callback_data') === 'dailybet:under_30');
@@ -289,6 +414,9 @@ test('weeklybet places a bet before monday noon and rejects after cutoff', funct
     }
 
     expect(PeriodicBet::query()->count())->toBe(1);
+
+    Http::assertSent(fn (HttpRequest $request) => str_contains($request->url(), '/sendMessage')
+        && str_contains((string) data_get($request->data(), 'text'), 'Tempo limite raggiunto per la weeklybet, scommetti la prossima settimana'));
 });
 
 test('daily and weekly periodic bets use dedicated points config', function () {

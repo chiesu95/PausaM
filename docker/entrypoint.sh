@@ -94,4 +94,22 @@ if [[ "${RUN_MIGRATIONS:-true}" == "true" ]]; then
   fi
 fi
 
-exec php artisan serve --host=0.0.0.0 --port="${PORT:-10000}"
+pids=()
+
+if [[ "${RUN_SCHEDULER:-true}" == "true" ]]; then
+  echo "Avvio Laravel scheduler (php artisan schedule:work)..."
+  php artisan schedule:work &
+  pids+=($!)
+fi
+
+echo "Avvio web server Laravel..."
+php artisan serve --host=0.0.0.0 --port="${PORT:-10000}" &
+pids+=($!)
+
+wait -n "${pids[@]}"
+exit_code=$?
+
+kill "${pids[@]}" 2>/dev/null || true
+wait "${pids[@]}" 2>/dev/null || true
+
+exit "$exit_code"
