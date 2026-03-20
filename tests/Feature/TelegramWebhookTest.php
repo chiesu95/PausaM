@@ -469,23 +469,23 @@ test('daily and weekly periodic bets use dedicated points config', function () {
     expect($player->total_bets)->toBe(2);
 });
 
-test('daily and weekly bet ranges are exclusive between brackets', function () {
+test('daily and weekly bet ranges are inclusive on upper boundaries', function () {
     expect(DailyBetChoice::Under30->isWinning(29.99))->toBeTrue();
     expect(DailyBetChoice::Under1Hour->isWinning(29.99))->toBeFalse();
     expect(DailyBetChoice::Under1Hour->isWinning(45.0))->toBeTrue();
     expect(DailyBetChoice::Under1Hour30->isWinning(45.0))->toBeFalse();
     expect(DailyBetChoice::Under1Hour30->isWinning(75.0))->toBeTrue();
     expect(DailyBetChoice::Over1Hour30->isWinning(75.0))->toBeFalse();
-    expect(DailyBetChoice::Under30->isWinning(30.0))->toBeFalse();
+    expect(DailyBetChoice::Under30->isWinning(30.0))->toBeTrue();
     expect(DailyBetChoice::Under1Hour->isWinning(30.0))->toBeFalse();
 
     expect(WeeklyBetChoice::Under3Hours->isWinning(170.0))->toBeTrue();
     expect(WeeklyBetChoice::Under4Hours->isWinning(170.0))->toBeFalse();
     expect(WeeklyBetChoice::Under4Hours->isWinning(200.0))->toBeTrue();
-    expect(WeeklyBetChoice::Under5Hours->isWinning(200.0))->toBeFalse();
-    expect(WeeklyBetChoice::Under5Hours->isWinning(260.0))->toBeTrue();
+    expect(WeeklyBetChoice::Under6Hours->isWinning(200.0))->toBeFalse();
+    expect(WeeklyBetChoice::Under6Hours->isWinning(260.0))->toBeTrue();
     expect(WeeklyBetChoice::Over6Hours->isWinning(260.0))->toBeFalse();
-    expect(WeeklyBetChoice::Under3Hours->isWinning(180.0))->toBeFalse();
+    expect(WeeklyBetChoice::Under3Hours->isWinning(180.0))->toBeTrue();
     expect(WeeklyBetChoice::Under4Hours->isWinning(180.0))->toBeFalse();
 });
 
