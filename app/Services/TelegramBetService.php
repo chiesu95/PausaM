@@ -757,8 +757,6 @@ class TelegramBetService
         return implode("\n", [
             'Comandi disponibili:',
             '/start [nome] - avvia il timer bagno (nome opzionale) e apre la scommessa',
-            '/dailybet <under30|under1h|under1h30|over1h30> - bet sul totale giornaliero (entro le 09:30)',
-            '/weeklybet <under3h|under4h|under5h|over6h> - bet sul totale settimanale (entro lunedi 12:00)',
             'Le puntate del round si fanno dai pulsanti del messaggio aperto con /start.',
             '/dailytotal - totale tempo bagno della giornata corrente',
             '/weeklytotal - totale settimana corrente e precedente (lunedi-domenica)',
