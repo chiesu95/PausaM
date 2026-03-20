@@ -48,6 +48,8 @@ class TelegramWebhookController extends Controller
         $fromTelegramId = isset($fromUser['id']) ? (string) $fromUser['id'] : null;
         $reply = '';
 
+        $betService->resolveExpiredPeriodicBetsForChat($chatId);
+
         switch ($command) {
             case 'newbet':
                 $reply = $betService->openRound($chatId, $fromTelegramId);
@@ -61,6 +63,34 @@ class TelegramWebhookController extends Controller
                 $reply = $arguments === ''
                     ? 'Specifica una puntata: /bet <under15|15-30|30-45|over45>.'
                     : $betService->placeBet($chatId, $fromUser, $arguments);
+                break;
+
+            case 'dailybet':
+                if ($arguments === '') {
+                    $reply = 'Scegli la dailybet (valida solo prima delle 09:30):';
+                    $inlineKeyboard = $betService->dailyBetInlineKeyboard();
+                    break;
+                }
+
+                $reply = $betService->placeDailyBet($chatId, $fromUser, $arguments);
+                break;
+
+            case 'weeklybet':
+                if ($arguments === '') {
+                    $reply = 'Scegli la weeklybet (valida entro lunedi alle 12:00):';
+                    $inlineKeyboard = $betService->weeklyBetInlineKeyboard();
+                    break;
+                }
+
+                $reply = $betService->placeWeeklyBet($chatId, $fromUser, $arguments);
+                break;
+
+            case 'dailytotal':
+                $reply = $betService->dailyTotalMessage($chatId);
+                break;
+
+            case 'weeklytotal':
+                $reply = $betService->weeklyTotalMessage($chatId);
                 break;
 
             case 'start':
@@ -124,27 +154,46 @@ class TelegramWebhookController extends Controller
             return response()->json(['ok' => true]);
         }
 
-        if (! preg_match('/^bet:(\d+):([a-z0-9_><-]+)$/i', $data, $matches)) {
-            $botService->answerCallbackQuery($callbackQueryId, 'Selezione non valida.');
+        if (preg_match('/^bet:(\d+):([a-z0-9_><-]+)$/i', $data, $matches)) {
+            $result = $betService->placeBetForRoundResult(
+                $chatId,
+                is_array($callbackQuery['from'] ?? null) ? $callbackQuery['from'] : [],
+                (int) $matches[1],
+                strtolower($matches[2]),
+            );
+
+            $reply = $result['message'];
+            $showAlert = $result['status'] !== TelegramBetService::BET_RESULT_PLACED;
+
+            $botService->answerCallbackQuery($callbackQueryId, mb_substr($reply, 0, 180), $showAlert);
+
+            if ($result['status'] === TelegramBetService::BET_RESULT_PLACED) {
+                $botService->sendMessage($chatId, $reply);
+            }
 
             return response()->json(['ok' => true]);
         }
 
-        $result = $betService->placeBetForRoundResult(
-            $chatId,
-            is_array($callbackQuery['from'] ?? null) ? $callbackQuery['from'] : [],
-            (int) $matches[1],
-            strtolower($matches[2]),
-        );
+        if (preg_match('/^(dailybet|weeklybet):([a-z0-9_><-]+)$/i', $data, $matches)) {
+            $fromUser = is_array($callbackQuery['from'] ?? null) ? $callbackQuery['from'] : [];
+            $choice = strtolower($matches[2]);
+            $result = strtolower($matches[1]) === 'dailybet'
+                ? $betService->placeDailyBetResult($chatId, $fromUser, $choice)
+                : $betService->placeWeeklyBetResult($chatId, $fromUser, $choice);
 
-        $reply = $result['message'];
-        $showAlert = $result['status'] !== TelegramBetService::BET_RESULT_PLACED;
+            $reply = $result['message'];
+            $showAlert = $result['status'] !== TelegramBetService::BET_RESULT_PLACED;
 
-        $botService->answerCallbackQuery($callbackQueryId, mb_substr($reply, 0, 180), $showAlert);
+            $botService->answerCallbackQuery($callbackQueryId, mb_substr($reply, 0, 180), $showAlert);
 
-        if ($result['status'] === TelegramBetService::BET_RESULT_PLACED) {
-            $botService->sendMessage($chatId, $reply);
+            if ($result['status'] === TelegramBetService::BET_RESULT_PLACED) {
+                $botService->sendMessage($chatId, $reply);
+            }
+
+            return response()->json(['ok' => true]);
         }
+
+        $botService->answerCallbackQuery($callbackQueryId, 'Selezione non valida.');
 
         return response()->json(['ok' => true]);
     }

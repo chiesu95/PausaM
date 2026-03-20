@@ -3,18 +3,28 @@
 namespace App\Services;
 
 use App\Enums\BetOutcome;
+use App\Enums\DailyBetChoice;
+use App\Enums\PeriodicBetType;
+use App\Enums\WeeklyBetChoice;
 use App\Models\BathroomSession;
 use App\Models\Bet;
 use App\Models\BetRound;
+use App\Models\PeriodicBet;
 use App\Models\TelegramPlayer;
+use Carbon\CarbonImmutable;
+use Carbon\CarbonInterface;
 use Illuminate\Support\Facades\DB;
 
 class TelegramBetService
 {
     public const BET_RESULT_PLACED = 'placed';
+
     public const BET_RESULT_ALREADY_PLACED = 'already_placed';
+
     public const BET_RESULT_ERROR = 'error';
+
     public const STOP_RESULT_RESOLVED = 'resolved';
+
     public const STOP_RESULT_NO_ACTIVE_SESSION = 'no_active_session';
 
     public function openRound(string $chatId, ?string $openedByTelegramId): string
@@ -44,6 +54,141 @@ class TelegramBetService
             'Punta con: /bet <opzione>',
             'Shortcut validi: under15, 15-30, 30-45, over45',
             'Tracciamento: /start [nome-opzionale] e /stop',
+        ]);
+    }
+
+    public function placeDailyBet(string $chatId, array $telegramUser, string $rawChoice): string
+    {
+        return $this->placeDailyBetResult($chatId, $telegramUser, $rawChoice)['message'];
+    }
+
+    public function placeWeeklyBet(string $chatId, array $telegramUser, string $rawChoice): string
+    {
+        return $this->placeWeeklyBetResult($chatId, $telegramUser, $rawChoice)['message'];
+    }
+
+    /**
+     * @return array{message: string, status: string}
+     */
+    public function placeDailyBetResult(string $chatId, array $telegramUser, string $rawChoice): array
+    {
+        $this->resolveExpiredPeriodicBetsForChat($chatId);
+
+        $choice = DailyBetChoice::fromInput($rawChoice);
+
+        if (! $choice) {
+            return [
+                'message' => 'Opzione non valida. Usa: under30, under1h, under1h30, over1h30.',
+                'status' => self::BET_RESULT_ERROR,
+            ];
+        }
+
+        return $this->placePeriodicBet(
+            $chatId,
+            $telegramUser,
+            PeriodicBetType::Daily,
+            $choice->value,
+        );
+    }
+
+    /**
+     * @return array{message: string, status: string}
+     */
+    public function placeWeeklyBetResult(string $chatId, array $telegramUser, string $rawChoice): array
+    {
+        $this->resolveExpiredPeriodicBetsForChat($chatId);
+
+        $choice = WeeklyBetChoice::fromInput($rawChoice);
+
+        if (! $choice) {
+            return [
+                'message' => 'Opzione non valida. Usa: under3h, under4h, under5h, over6h.',
+                'status' => self::BET_RESULT_ERROR,
+            ];
+        }
+
+        return $this->placePeriodicBet(
+            $chatId,
+            $telegramUser,
+            PeriodicBetType::Weekly,
+            $choice->value,
+        );
+    }
+
+    /**
+     * @return array<int, array<int, array{text: string, callback_data: string}>>
+     */
+    public function dailyBetInlineKeyboard(): array
+    {
+        return [
+            [
+                ['text' => 'Under 30m', 'callback_data' => 'dailybet:under_30'],
+                ['text' => 'Under 1h', 'callback_data' => 'dailybet:under_1h'],
+            ],
+            [
+                ['text' => 'Under 1h30', 'callback_data' => 'dailybet:under_1h30'],
+                ['text' => 'Over 1h30', 'callback_data' => 'dailybet:over_1h30'],
+            ],
+        ];
+    }
+
+    /**
+     * @return array<int, array<int, array{text: string, callback_data: string}>>
+     */
+    public function weeklyBetInlineKeyboard(): array
+    {
+        return [
+            [
+                ['text' => 'Under 3h', 'callback_data' => 'weeklybet:under_3h'],
+                ['text' => 'Under 4h', 'callback_data' => 'weeklybet:under_4h'],
+            ],
+            [
+                ['text' => 'Under 5h', 'callback_data' => 'weeklybet:under_5h'],
+                ['text' => 'Over 6h', 'callback_data' => 'weeklybet:over_6h'],
+            ],
+        ];
+    }
+
+    public function dailyTotalMessage(string $chatId): string
+    {
+        $this->resolveExpiredPeriodicBetsForChat($chatId);
+
+        $nowLocal = $this->nowInBetTimezone();
+        [$periodStart, $periodEnd] = $this->periodBoundsForType(PeriodicBetType::Daily, $nowLocal);
+        $totalMinutes = $this->totalMinutesBetween($periodStart, $periodEnd);
+
+        return sprintf(
+            'Totale giornata %s: %s.',
+            $periodStart->format('d/m/Y'),
+            $this->formatMinutes($totalMinutes),
+        );
+    }
+
+    public function weeklyTotalMessage(string $chatId): string
+    {
+        $this->resolveExpiredPeriodicBetsForChat($chatId);
+
+        $nowLocal = $this->nowInBetTimezone();
+        [$currentWeekStart, $currentWeekEnd] = $this->periodBoundsForType(PeriodicBetType::Weekly, $nowLocal);
+        $previousWeekStart = $currentWeekStart->subWeek();
+        $previousWeekEnd = $currentWeekStart;
+
+        $currentWeekTotal = $this->totalMinutesBetween($currentWeekStart, $currentWeekEnd);
+        $previousWeekTotal = $this->totalMinutesBetween($previousWeekStart, $previousWeekEnd);
+
+        return implode("\n", [
+            sprintf(
+                'Settimana corrente (%s - %s): %s.',
+                $currentWeekStart->format('d/m/Y'),
+                $currentWeekEnd->subDay()->format('d/m/Y'),
+                $this->formatMinutes($currentWeekTotal),
+            ),
+            sprintf(
+                'Settimana precedente (%s - %s): %s.',
+                $previousWeekStart->format('d/m/Y'),
+                $previousWeekEnd->subDay()->format('d/m/Y'),
+                $this->formatMinutes($previousWeekTotal),
+            ),
         ]);
     }
 
@@ -353,10 +498,67 @@ class TelegramBetService
             '/start [nome] - avvia il timer bagno (nome opzionale) e apre la scommessa',
             '/newbet - apre una nuova scommessa (se ti serve senza /start)',
             '/bet <under15|15-30|30-45|over45> - piazza la puntata (accetta anche "from 15 to 30" ecc.)',
+            '/dailybet <under30|under1h|under1h30|over1h30> - bet sul totale giornaliero (entro le 09:30)',
+            '/weeklybet <under3h|under4h|under5h|over6h> - bet sul totale settimanale (entro lunedi 12:00)',
+            '/dailytotal - totale tempo bagno della giornata corrente',
+            '/weeklytotal - totale settimana corrente e precedente (lunedi-domenica)',
             '/stop - chiude timer e risolve la scommessa',
             '/link <codice> - collega account Telegram a utente portale',
             '/leaderboard - mostra la classifica punti',
         ]);
+    }
+
+    public function resolveExpiredPeriodicBetsForChat(string $chatId): void
+    {
+        $nowLocal = $this->nowInBetTimezone();
+
+        $pendingBets = PeriodicBet::query()
+            ->where('telegram_chat_id', $chatId)
+            ->whereNull('resolved_at')
+            ->get()
+            ->groupBy(fn (PeriodicBet $bet) => $bet->type->value.'|'.$bet->period_start_date?->toDateString());
+
+        foreach ($pendingBets as $betsForPeriod) {
+            $firstBet = $betsForPeriod->first();
+
+            if (! $firstBet || ! $firstBet->period_start_date) {
+                continue;
+            }
+
+            $periodStart = CarbonImmutable::parse(
+                $firstBet->period_start_date->toDateString(),
+                $this->betTimezone(),
+            )->startOfDay();
+
+            [$start, $end] = $this->periodBoundsFromStart($firstBet->type, $periodStart);
+
+            if ($end->greaterThan($nowLocal)) {
+                continue;
+            }
+
+            $totalMinutes = $this->totalMinutesBetween($start, $end);
+            $resolvedAt = now();
+            $pointsPerWin = $this->pointsPerWinForPeriodicType($firstBet->type);
+
+            foreach ($betsForPeriod as $bet) {
+                $isWinner = $this->periodicBetWins($bet, $totalMinutes);
+                $awardedPoints = $isWinner ? $pointsPerWin : 0;
+
+                $bet->update([
+                    'resolved_at' => $resolvedAt,
+                    'resolved_total_minutes' => round($totalMinutes, 2),
+                    'is_winner' => $isWinner,
+                    'awarded_points' => $awardedPoints,
+                ]);
+
+                if (! $isWinner) {
+                    continue;
+                }
+
+                $bet->player()->increment('points', $awardedPoints);
+                $bet->player()->increment('wins');
+            }
+        }
     }
 
     /**
@@ -407,5 +609,182 @@ class TelegramBetService
     protected function resolveChoice(string $rawChoice): ?BetOutcome
     {
         return BetOutcome::tryFrom($rawChoice) ?? BetOutcome::fromInput($rawChoice);
+    }
+
+    protected function placePeriodicBet(
+        string $chatId,
+        array $telegramUser,
+        PeriodicBetType $type,
+        string $choiceValue
+    ): array {
+        if (! isset($telegramUser['id'])) {
+            return [
+                'message' => 'Impossibile identificare l\'utente Telegram per registrare la puntata.',
+                'status' => self::BET_RESULT_ERROR,
+            ];
+        }
+
+        $nowLocal = $this->nowInBetTimezone();
+        [$periodStart, $periodEnd] = $this->periodBoundsForType($type, $nowLocal);
+        $cutoff = $this->betCutoffForType($type, $periodStart);
+
+        if ($nowLocal->greaterThanOrEqualTo($cutoff)) {
+            return [
+                'message' => match ($type) {
+                    PeriodicBetType::Daily => 'Tempo scaduto: la dailybet si puo piazzare solo prima delle 09:30.',
+                    PeriodicBetType::Weekly => 'Tempo scaduto: la weeklybet si puo piazzare solo entro lunedi alle 12:00.',
+                },
+                'status' => self::BET_RESULT_ERROR,
+            ];
+        }
+
+        $player = $this->upsertPlayer($telegramUser);
+        $periodDate = $periodStart->toDateString();
+
+        $existingBet = PeriodicBet::query()
+            ->where('telegram_chat_id', $chatId)
+            ->where('telegram_player_id', $player->id)
+            ->where('type', $type)
+            ->whereDate('period_start_date', $periodDate)
+            ->first();
+
+        if ($existingBet) {
+            return [
+                'message' => sprintf(
+                    '%s, hai gia piazzato la bet %s su: %s.',
+                    $this->displayName($player),
+                    $type->label(),
+                    $this->periodicChoiceLabel($type, $existingBet->choice),
+                ),
+                'status' => self::BET_RESULT_ALREADY_PLACED,
+            ];
+        }
+
+        PeriodicBet::query()->create([
+            'telegram_chat_id' => $chatId,
+            'telegram_player_id' => $player->id,
+            'type' => $type,
+            'period_start_date' => $periodDate,
+            'choice' => $choiceValue,
+        ]);
+        $player->increment('total_bets');
+
+        $periodLabel = match ($type) {
+            PeriodicBetType::Daily => sprintf('giorno %s', $periodStart->format('d/m/Y')),
+            PeriodicBetType::Weekly => sprintf(
+                'settimana %s - %s',
+                $periodStart->format('d/m/Y'),
+                $periodEnd->subDay()->format('d/m/Y'),
+            ),
+        };
+
+        return [
+            'message' => sprintf(
+                '%s ha piazzato la bet %s su: %s (%s).',
+                $this->displayName($player),
+                $type->label(),
+                $this->periodicChoiceLabel($type, $choiceValue),
+                $periodLabel,
+            ),
+            'status' => self::BET_RESULT_PLACED,
+        ];
+    }
+
+    /**
+     * @return array{0: CarbonImmutable, 1: CarbonImmutable}
+     */
+    protected function periodBoundsForType(PeriodicBetType $type, CarbonImmutable $reference): array
+    {
+        return match ($type) {
+            PeriodicBetType::Daily => [$reference->startOfDay(), $reference->startOfDay()->addDay()],
+            PeriodicBetType::Weekly => [
+                $reference->startOfWeek(CarbonInterface::MONDAY)->startOfDay(),
+                $reference->startOfWeek(CarbonInterface::MONDAY)->startOfDay()->addWeek(),
+            ],
+        };
+    }
+
+    /**
+     * @return array{0: CarbonImmutable, 1: CarbonImmutable}
+     */
+    protected function periodBoundsFromStart(PeriodicBetType $type, CarbonImmutable $periodStart): array
+    {
+        return match ($type) {
+            PeriodicBetType::Daily => [$periodStart, $periodStart->addDay()],
+            PeriodicBetType::Weekly => [$periodStart, $periodStart->addWeek()],
+        };
+    }
+
+    protected function betCutoffForType(PeriodicBetType $type, CarbonImmutable $periodStart): CarbonImmutable
+    {
+        return match ($type) {
+            PeriodicBetType::Daily => $periodStart->setTime(9, 30),
+            PeriodicBetType::Weekly => $periodStart->setTime(12, 0),
+        };
+    }
+
+    protected function periodicChoiceLabel(PeriodicBetType $type, string $choiceValue): string
+    {
+        return match ($type) {
+            PeriodicBetType::Daily => DailyBetChoice::tryFrom($choiceValue)?->label() ?? $choiceValue,
+            PeriodicBetType::Weekly => WeeklyBetChoice::tryFrom($choiceValue)?->label() ?? $choiceValue,
+        };
+    }
+
+    protected function periodicBetWins(PeriodicBet $bet, float $totalMinutes): bool
+    {
+        return match ($bet->type) {
+            PeriodicBetType::Daily => DailyBetChoice::tryFrom($bet->choice)?->isWinning($totalMinutes) ?? false,
+            PeriodicBetType::Weekly => WeeklyBetChoice::tryFrom($bet->choice)?->isWinning($totalMinutes) ?? false,
+        };
+    }
+
+    protected function totalMinutesBetween(CarbonImmutable $periodStart, CarbonImmutable $periodEnd): float
+    {
+        $periodStartUtc = $periodStart->setTimezone('UTC');
+        $periodEndUtc = $periodEnd->setTimezone('UTC');
+
+        return (float) BathroomSession::query()
+            ->whereNotNull('ended_at')
+            ->where('ended_at', '>=', $periodStartUtc)
+            ->where('ended_at', '<', $periodEndUtc)
+            ->sum('duration_minutes');
+    }
+
+    protected function formatMinutes(float $minutes): string
+    {
+        $roundedMinutes = round($minutes, 2);
+        $wholeMinutes = (int) round($roundedMinutes);
+        $hours = intdiv($wholeMinutes, 60);
+        $remainingMinutes = $wholeMinutes % 60;
+        $humanReadable = $hours > 0
+            ? sprintf('%dh %02dm', $hours, $remainingMinutes)
+            : sprintf('%dm', $remainingMinutes);
+
+        return sprintf('%.2f minuti (%s)', $roundedMinutes, $humanReadable);
+    }
+
+    protected function nowInBetTimezone(): CarbonImmutable
+    {
+        return CarbonImmutable::now($this->betTimezone());
+    }
+
+    protected function betTimezone(): string
+    {
+        return (string) config('services.telegram.bet_timezone', config('app.timezone', 'UTC'));
+    }
+
+    protected function pointsPerWinForPeriodicType(PeriodicBetType $type): int
+    {
+        return match ($type) {
+            PeriodicBetType::Daily => (int) config(
+                'services.telegram.points_per_win_daily',
+                config('services.telegram.points_per_win', 10),
+            ),
+            PeriodicBetType::Weekly => (int) config(
+                'services.telegram.points_per_win_weekly',
+                config('services.telegram.points_per_win', 10),
+            ),
+        };
     }
 }

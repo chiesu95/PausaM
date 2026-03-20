@@ -39,7 +39,10 @@ return [
         'bot_token' => env('TELEGRAM_BOT_TOKEN'),
         'webhook_secret' => env('TELEGRAM_WEBHOOK_SECRET'),
         'points_per_win' => env('TELEGRAM_POINTS_PER_WIN', 10),
+        'points_per_win_daily' => env('TELEGRAM_POINTS_PER_WIN_DAILY', env('TELEGRAM_POINTS_PER_WIN', 10)),
+        'points_per_win_weekly' => env('TELEGRAM_POINTS_PER_WIN_WEEKLY', env('TELEGRAM_POINTS_PER_WIN', 10)),
         'link_code_ttl_minutes' => env('TELEGRAM_LINK_CODE_TTL_MINUTES', 15),
+        'bet_timezone' => env('TELEGRAM_BET_TIMEZONE', 'Europe/Rome'),
     ],
 
 ];

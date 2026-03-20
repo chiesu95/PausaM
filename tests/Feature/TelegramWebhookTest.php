@@ -1,9 +1,11 @@
 <?php
 
 use App\Enums\BetOutcome;
+use App\Enums\PeriodicBetType;
 use App\Models\BathroomSession;
 use App\Models\Bet;
 use App\Models\BetRound;
+use App\Models\PeriodicBet;
 use App\Models\TelegramLinkCode;
 use App\Models\TelegramPlayer;
 use App\Models\User;
@@ -13,6 +15,7 @@ use Illuminate\Support\Facades\Http;
 
 beforeEach(function () {
     config()->set('services.telegram.webhook_secret', null);
+    config()->set('services.telegram.bet_timezone', 'UTC');
 });
 
 function telegramUpdate(string $text, int $userId = 1, string $username = 'user1', int $chatId = -100123): array
@@ -200,4 +203,241 @@ test('link command associates telegram account to a portal user', function () {
     expect($player->user_id)->toBe($user->id);
     expect($linkCode->used_at)->not()->toBeNull();
     expect($linkCode->used_by_telegram_player_id)->toBe($player->id);
+});
+
+test('dailybet places a bet before cutoff and rejects bets after 09:30', function () {
+    config()->set('services.telegram.bot_token', 'test-token');
+    Http::fake();
+    Carbon::setTestNow(Carbon::parse('2026-03-20 09:00:00', 'UTC'));
+
+    try {
+        $this->postJson('/telegram/webhook', telegramUpdate('/dailybet under1h', 11, 'daily_user'));
+
+        $dailyBet = PeriodicBet::query()->firstOrFail();
+
+        expect($dailyBet->type)->toBe(PeriodicBetType::Daily);
+        expect($dailyBet->choice)->toBe('under_1h');
+        expect($dailyBet->period_start_date?->toDateString())->toBe('2026-03-20');
+
+        Carbon::setTestNow(Carbon::parse('2026-03-20 09:30:00', 'UTC'));
+        $this->postJson('/telegram/webhook', telegramUpdate('/dailybet under30', 12, 'late_user'));
+    } finally {
+        Carbon::setTestNow();
+    }
+
+    expect(PeriodicBet::query()->count())->toBe(1);
+
+    Http::assertSent(fn (HttpRequest $request) => str_contains($request->url(), '/sendMessage')
+        && str_contains((string) data_get($request->data(), 'text'), 'Tempo scaduto'));
+});
+
+test('dailybet and weeklybet commands without options send inline buttons', function () {
+    config()->set('services.telegram.bot_token', 'test-token');
+    Http::fake();
+
+    $this->postJson('/telegram/webhook', telegramUpdate('/dailybet', 13, 'buttons_user'));
+    $this->postJson('/telegram/webhook', telegramUpdate('/weeklybet', 13, 'buttons_user'));
+
+    Http::assertSent(fn (HttpRequest $request) => str_contains($request->url(), '/sendMessage')
+        && data_get($request->data(), 'reply_markup.inline_keyboard.0.0.callback_data') === 'dailybet:under_30');
+
+    Http::assertSent(fn (HttpRequest $request) => str_contains($request->url(), '/sendMessage')
+        && data_get($request->data(), 'reply_markup.inline_keyboard.0.0.callback_data') === 'weeklybet:under_3h');
+});
+
+test('dailybet callback places bet once and prevents changes', function () {
+    config()->set('services.telegram.bot_token', 'test-token');
+    Http::fake();
+    Carbon::setTestNow(Carbon::parse('2026-03-20 09:00:00', 'UTC'));
+
+    try {
+        $this->postJson('/telegram/webhook', telegramCallbackUpdate('dailybet:under_1h', 999, 14, 'daily_callback_user'));
+        $this->postJson('/telegram/webhook', telegramCallbackUpdate('dailybet:under_30', 999, 14, 'daily_callback_user'));
+    } finally {
+        Carbon::setTestNow();
+    }
+
+    $player = TelegramPlayer::query()->where('telegram_user_id', '14')->firstOrFail();
+    $bet = PeriodicBet::query()->where('telegram_player_id', $player->id)->firstOrFail();
+
+    expect($bet->type)->toBe(PeriodicBetType::Daily);
+    expect($bet->choice)->toBe('under_1h');
+    expect($player->total_bets)->toBe(1);
+
+    Http::assertSent(fn (HttpRequest $request) => str_contains($request->url(), '/answerCallbackQuery')
+        && data_get($request->data(), 'show_alert') === true);
+});
+
+test('weeklybet places a bet before monday noon and rejects after cutoff', function () {
+    config()->set('services.telegram.bot_token', 'test-token');
+    Http::fake();
+    Carbon::setTestNow(Carbon::parse('2026-03-16 11:00:00', 'UTC'));
+
+    try {
+        $this->postJson('/telegram/webhook', telegramUpdate('/weeklybet under4h', 21, 'week_user'));
+
+        $weeklyBet = PeriodicBet::query()->firstOrFail();
+
+        expect($weeklyBet->type)->toBe(PeriodicBetType::Weekly);
+        expect($weeklyBet->choice)->toBe('under_4h');
+        expect($weeklyBet->period_start_date?->toDateString())->toBe('2026-03-16');
+
+        Carbon::setTestNow(Carbon::parse('2026-03-16 12:00:00', 'UTC'));
+        $this->postJson('/telegram/webhook', telegramUpdate('/weeklybet over6h', 22, 'week_late'));
+    } finally {
+        Carbon::setTestNow();
+    }
+
+    expect(PeriodicBet::query()->count())->toBe(1);
+});
+
+test('daily and weekly periodic bets use dedicated points config', function () {
+    config()->set('services.telegram.bot_token', 'test-token');
+    config()->set('services.telegram.points_per_win', 5);
+    config()->set('services.telegram.points_per_win_daily', 10);
+    config()->set('services.telegram.points_per_win_weekly', 15);
+    Http::fake();
+    Carbon::setTestNow(Carbon::parse('2026-03-16 09:00:00', 'UTC'));
+
+    try {
+        $this->postJson('/telegram/webhook', telegramUpdate('/dailybet under1h', 23, 'points_user'));
+        $this->postJson('/telegram/webhook', telegramUpdate('/weeklybet under5h', 23, 'points_user'));
+
+        BathroomSession::query()->create([
+            'person_name' => 'A',
+            'started_at' => Carbon::parse('2026-03-16 09:00:00', 'UTC'),
+            'ended_at' => Carbon::parse('2026-03-16 09:50:00', 'UTC'),
+            'duration_minutes' => 50,
+        ]);
+        BathroomSession::query()->create([
+            'person_name' => 'B',
+            'started_at' => Carbon::parse('2026-03-18 10:00:00', 'UTC'),
+            'ended_at' => Carbon::parse('2026-03-18 12:00:00', 'UTC'),
+            'duration_minutes' => 120,
+        ]);
+
+        Carbon::setTestNow(Carbon::parse('2026-03-17 10:00:00', 'UTC'));
+        $this->postJson('/telegram/webhook', telegramUpdate('/dailytotal', 23, 'points_user'));
+
+        Carbon::setTestNow(Carbon::parse('2026-03-23 10:00:00', 'UTC'));
+        $this->postJson('/telegram/webhook', telegramUpdate('/weeklytotal', 23, 'points_user'));
+    } finally {
+        Carbon::setTestNow();
+    }
+
+    $player = TelegramPlayer::query()->where('telegram_user_id', '23')->firstOrFail();
+    $dailyBet = PeriodicBet::query()->where('type', PeriodicBetType::Daily)->firstOrFail();
+    $weeklyBet = PeriodicBet::query()->where('type', PeriodicBetType::Weekly)->firstOrFail();
+
+    expect($dailyBet->is_winner)->toBeTrue();
+    expect($dailyBet->awarded_points)->toBe(10);
+    expect($weeklyBet->is_winner)->toBeTrue();
+    expect($weeklyBet->awarded_points)->toBe(15);
+
+    expect($player->points)->toBe(25);
+    expect($player->wins)->toBe(2);
+    expect($player->total_bets)->toBe(2);
+});
+
+test('dailytotal command returns summed time for current day', function () {
+    config()->set('services.telegram.bot_token', 'test-token');
+    Http::fake();
+    Carbon::setTestNow(Carbon::parse('2026-03-20 18:00:00', 'UTC'));
+
+    try {
+        BathroomSession::query()->create([
+            'person_name' => 'A',
+            'started_at' => Carbon::parse('2026-03-20 08:00:00', 'UTC'),
+            'ended_at' => Carbon::parse('2026-03-20 08:25:00', 'UTC'),
+            'duration_minutes' => 25,
+        ]);
+        BathroomSession::query()->create([
+            'person_name' => 'B',
+            'started_at' => Carbon::parse('2026-03-20 12:00:00', 'UTC'),
+            'ended_at' => Carbon::parse('2026-03-20 12:50:00', 'UTC'),
+            'duration_minutes' => 50,
+        ]);
+        BathroomSession::query()->create([
+            'person_name' => 'C',
+            'started_at' => Carbon::parse('2026-03-19 20:00:00', 'UTC'),
+            'ended_at' => Carbon::parse('2026-03-19 20:20:00', 'UTC'),
+            'duration_minutes' => 20,
+        ]);
+
+        $this->postJson('/telegram/webhook', telegramUpdate('/dailytotal', 31, 'tot_user'));
+    } finally {
+        Carbon::setTestNow();
+    }
+
+    Http::assertSent(fn (HttpRequest $request) => str_contains($request->url(), '/sendMessage')
+        && str_contains((string) data_get($request->data(), 'text'), 'Totale giornata 20/03/2026: 75.00 minuti (1h 15m).'));
+});
+
+test('weeklytotal command returns current and previous monday-sunday totals', function () {
+    config()->set('services.telegram.bot_token', 'test-token');
+    Http::fake();
+    Carbon::setTestNow(Carbon::parse('2026-03-18 10:00:00', 'UTC'));
+
+    try {
+        BathroomSession::query()->create([
+            'person_name' => 'A',
+            'started_at' => Carbon::parse('2026-03-16 08:00:00', 'UTC'),
+            'ended_at' => Carbon::parse('2026-03-16 08:30:00', 'UTC'),
+            'duration_minutes' => 30,
+        ]);
+        BathroomSession::query()->create([
+            'person_name' => 'B',
+            'started_at' => Carbon::parse('2026-03-20 09:00:00', 'UTC'),
+            'ended_at' => Carbon::parse('2026-03-20 09:45:00', 'UTC'),
+            'duration_minutes' => 45,
+        ]);
+        BathroomSession::query()->create([
+            'person_name' => 'C',
+            'started_at' => Carbon::parse('2026-03-10 11:00:00', 'UTC'),
+            'ended_at' => Carbon::parse('2026-03-10 12:00:00', 'UTC'),
+            'duration_minutes' => 60,
+        ]);
+        BathroomSession::query()->create([
+            'person_name' => 'D',
+            'started_at' => Carbon::parse('2026-03-15 18:00:00', 'UTC'),
+            'ended_at' => Carbon::parse('2026-03-15 18:20:00', 'UTC'),
+            'duration_minutes' => 20,
+        ]);
+
+        $this->postJson('/telegram/webhook', telegramUpdate('/weeklytotal', 32, 'week_total_user'));
+    } finally {
+        Carbon::setTestNow();
+    }
+
+    Http::assertSent(fn (HttpRequest $request) => str_contains($request->url(), '/sendMessage')
+        && str_contains((string) data_get($request->data(), 'text'), 'Settimana corrente (16/03/2026 - 22/03/2026): 75.00 minuti (1h 15m).')
+        && str_contains((string) data_get($request->data(), 'text'), 'Settimana precedente (09/03/2026 - 15/03/2026): 80.00 minuti (1h 20m).'));
+});
+
+test('periodic bets are resolved automatically when period has ended', function () {
+    config()->set('services.telegram.bot_token', 'test-token');
+    Http::fake();
+    Carbon::setTestNow(Carbon::parse('2026-03-19 08:00:00', 'UTC'));
+
+    try {
+        $this->postJson('/telegram/webhook', telegramUpdate('/dailybet under1h', 41, 'resolve_user'));
+
+        BathroomSession::query()->create([
+            'person_name' => 'A',
+            'started_at' => Carbon::parse('2026-03-19 17:00:00', 'UTC'),
+            'ended_at' => Carbon::parse('2026-03-19 18:10:00', 'UTC'),
+            'duration_minutes' => 70,
+        ]);
+
+        Carbon::setTestNow(Carbon::parse('2026-03-20 10:00:00', 'UTC'));
+        $this->postJson('/telegram/webhook', telegramUpdate('/dailytotal', 41, 'resolve_user'));
+    } finally {
+        Carbon::setTestNow();
+    }
+
+    $periodicBet = PeriodicBet::query()->firstOrFail();
+
+    expect($periodicBet->resolved_at)->not()->toBeNull();
+    expect($periodicBet->resolved_total_minutes)->toBe(70.0);
+    expect($periodicBet->is_winner)->toBeFalse();
 });
